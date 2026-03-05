@@ -65,6 +65,7 @@ Actor.main(async () => {
     }
 
     const {
+        cookie,
         companies = [],
         profileScraperMode = 'short',
         locations = [],
@@ -90,6 +91,9 @@ Actor.main(async () => {
     const functionIds = rawFunctionIds.map(String);
 
     // Validate input
+    if (!cookie) {
+        throw new Error('Please provide your LinkedIn "li_at" session cookie. See the actor description for instructions on how to get it.');
+    }
     if (!companies.length) {
         throw new Error('Please provide at least one company URL or name in the "companies" input field.');
     }
@@ -111,8 +115,8 @@ Actor.main(async () => {
         proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
     }
 
-    // Initialize LinkedIn client
-    const client = new LinkedInClient(proxyConfig);
+    // Initialize LinkedIn client with authenticated session
+    const client = new LinkedInClient(cookie, proxyConfig);
     await client.initSession();
 
     // Load state for resume capability

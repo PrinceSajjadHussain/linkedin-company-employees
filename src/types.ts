@@ -1,5 +1,6 @@
 // ─── Input Schema ─────────────────────────────────────────────────────────────
 export interface InputSchema {
+    cookie: string;
     companies: string[];
     profileScraperMode?: string;
     locations?: string[];

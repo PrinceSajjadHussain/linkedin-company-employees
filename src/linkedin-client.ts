@@ -53,53 +53,67 @@ async function fetchWithProxy(
 export class LinkedInClient {
     private csrfToken = '';
     private cookies = '';
+    private liAtCookie = '';
     private proxyConfig?: ProxyConfiguration;
     private sessionValid = false;
 
-    constructor(proxyConfig?: ProxyConfiguration) {
+    constructor(liAtCookie: string, proxyConfig?: ProxyConfiguration) {
+        this.liAtCookie = liAtCookie;
         this.proxyConfig = proxyConfig;
     }
 
-    /** Initialize a guest session by visiting LinkedIn and extracting CSRF token. */
+    /** Initialize an authenticated session using the li_at cookie. */
     async initSession(): Promise<void> {
-        log.info('Initializing LinkedIn guest session...');
+        log.info('Initializing LinkedIn authenticated session...');
         const proxyUrl = this.proxyConfig ? await this.proxyConfig.newUrl() : undefined;
 
+        // Set up cookies with the provided li_at token
+        this.cookies = `li_at=${this.liAtCookie}; li_gc=1; lang=en_US`;
+
+        // Fetch LinkedIn to get JSESSIONID / CSRF token
         const resp = await fetchWithProxy(
-            LINKEDIN_BASE,
+            `${LINKEDIN_BASE}/feed/`,
             {
                 method: 'GET',
                 headers: {
                     'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                     'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                     'accept-language': 'en-US,en;q=0.9',
+                    'cookie': this.cookies,
                 },
                 redirect: 'follow',
             },
             proxyUrl,
         );
 
+        // Extract JSESSIONID from set-cookie response headers
         const setCookies = resp.headers.getSetCookie?.() || [];
-        this.cookies = parseCookies(setCookies);
-        this.csrfToken = extractCsrfToken(this.cookies);
+        const allCookies = parseCookies(setCookies);
+        this.csrfToken = extractCsrfToken(allCookies || this.cookies);
 
         if (!this.csrfToken) {
             // Try to extract from response body
             const body = await resp.text();
             const match = body.match(/JSESSIONID.*?["']([^"']+)["']/);
             if (match) {
-                this.csrfToken = match[1];
-                this.cookies += `; JSESSIONID="${this.csrfToken}"`;
+                this.csrfToken = match[1].replace(/"/g, '');
             }
         }
 
-        // Also add consent cookie
-        if (!this.cookies.includes('li_at')) {
-            this.cookies += '; bcookie="v=2&aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"; li_gc=1; lang=en_US';
+        // Merge cookies
+        if (allCookies) {
+            this.cookies = `li_at=${this.liAtCookie}; ${allCookies}`;
+        }
+        if (this.csrfToken && !this.cookies.includes('JSESSIONID')) {
+            this.cookies += `; JSESSIONID="${this.csrfToken}"`;
         }
 
         this.sessionValid = !!this.csrfToken;
         log.info(`Session initialized. CSRF token: ${this.csrfToken ? 'obtained' : 'MISSING'}`);
+
+        if (!this.sessionValid) {
+            log.warning('Could not obtain CSRF token. The li_at cookie may be invalid or expired.');
+        }
     }
 
     /** Get default headers for Voyager API requests. */
