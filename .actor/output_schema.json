@@ -28,7 +28,7 @@
       "template": "raw"
     },
     "location": {
-      "type": "object",
+      "type": "string",
       "description": "Employee location",
       "template": "raw"
     },
