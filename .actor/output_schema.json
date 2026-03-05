@@ -5,44 +5,52 @@
     "publicIdentifier": {
       "type": "string",
       "label": "Public Identifier",
-      "description": "LinkedIn public profile identifier"
+      "description": "LinkedIn public profile identifier",
+      "template": "raw"
     },
     "linkedinUrl": {
       "type": "string",
       "label": "LinkedIn URL",
-      "description": "Full LinkedIn profile URL"
+      "description": "Full LinkedIn profile URL",
+      "template": "raw"
     },
     "firstName": {
       "type": "string",
       "label": "First Name",
-      "description": "Employee first name"
+      "description": "Employee first name",
+      "template": "raw"
     },
     "lastName": {
       "type": "string",
       "label": "Last Name",
-      "description": "Employee last name"
+      "description": "Employee last name",
+      "template": "raw"
     },
     "headline": {
       "type": "string",
       "label": "Headline",
-      "description": "LinkedIn headline"
+      "description": "LinkedIn headline",
+      "template": "raw"
     },
     "location": {
       "type": "object",
       "label": "Location",
-      "description": "Employee location"
+      "description": "Employee location",
+      "template": "raw"
     },
     "photo": {
       "type": "string",
       "label": "Photo",
       "description": "Profile photo URL",
-      "nullable": true
+      "nullable": true,
+      "template": "raw"
     },
     "email": {
       "type": "string",
       "label": "Email",
       "description": "Discovered email address",
-      "nullable": true
+      "nullable": true,
+      "template": "raw"
     }
   },
   "views": {
