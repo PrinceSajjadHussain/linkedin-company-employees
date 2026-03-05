@@ -1,7 +1,50 @@
 {
   "actorOutputSchemaVersion": 1,
-  "actorSpecification": 1,
-  "fields": {},
+  "type": "object",
+  "properties": {
+    "publicIdentifier": {
+      "type": "string",
+      "label": "Public Identifier",
+      "description": "LinkedIn public profile identifier"
+    },
+    "linkedinUrl": {
+      "type": "string",
+      "label": "LinkedIn URL",
+      "description": "Full LinkedIn profile URL"
+    },
+    "firstName": {
+      "type": "string",
+      "label": "First Name",
+      "description": "Employee first name"
+    },
+    "lastName": {
+      "type": "string",
+      "label": "Last Name",
+      "description": "Employee last name"
+    },
+    "headline": {
+      "type": "string",
+      "label": "Headline",
+      "description": "LinkedIn headline"
+    },
+    "location": {
+      "type": "object",
+      "label": "Location",
+      "description": "Employee location"
+    },
+    "photo": {
+      "type": "string",
+      "label": "Photo",
+      "description": "Profile photo URL",
+      "nullable": true
+    },
+    "email": {
+      "type": "string",
+      "label": "Email",
+      "description": "Discovered email address",
+      "nullable": true
+    }
+  },
   "views": {
     "overview": {
       "title": "Overview",
@@ -11,8 +54,6 @@
           "lastName",
           "headline",
           "linkedinUrl",
-          "location",
-          "currentPosition",
           "email"
         ]
       },
