@@ -1,0 +1,133 @@
+{
+  "title": "LinkedIn Company Employees Scraper",
+  "description": "Extract LinkedIn company employees with filters and detailed profile information. No cookies or account required.",
+  "type": "object",
+  "schemaVersion": 1,
+  "required": ["companies"],
+  "properties": {
+    "companies": {
+      "title": "Company URLs or Names",
+      "type": "array",
+      "description": "List of LinkedIn company URLs (e.g., https://www.linkedin.com/company/google) or company names. URLs are preferred for accuracy.",
+      "editor": "stringList",
+      "prefill": ["https://www.linkedin.com/company/google"]
+    },
+    "profileScraperMode": {
+      "title": "Profile Scraper Mode",
+      "type": "string",
+      "description": "Choose the level of detail for scraped profiles.\n- Short: name, headline, location, current positions\n- Full: complete work experience, education, skills, and more\n- Full + email search: all Full data plus email discovery",
+      "editor": "select",
+      "default": "Short ($4 per 1k)",
+      "enum": [
+        "Short ($4 per 1k)",
+        "Full ($8 per 1k)",
+        "Full + email search ($12 per 1k)"
+      ],
+      "enumTitles": [
+        "Short — Name, headline, location, current positions ($4/1k)",
+        "Full — Complete profile with experience, education, skills ($8/1k)",
+        "Full + Email Search — All data + email discovery ($12/1k)"
+      ]
+    },
+    "locations": {
+      "title": "Location Filter",
+      "type": "array",
+      "description": "Filter employees by location (e.g., New York, San Francisco, London). Uses LinkedIn's location autocomplete. Use full names like 'United Kingdom' instead of 'UK'.",
+      "editor": "stringList",
+      "sectionCaption": "Filters",
+      "sectionDescription": "Optional filters to narrow down employee search results."
+    },
+    "searchQuery": {
+      "title": "Search Query",
+      "type": "string",
+      "description": "General search query for fuzzy matching (e.g., 'Founder', 'Marketing Manager', 'John Doe'). Supports LinkedIn search operators.",
+      "editor": "textfield"
+    },
+    "jobTitles": {
+      "title": "Job Titles (Strict Search)",
+      "type": "array",
+      "description": "Filter employees by exact job titles (e.g., Software Engineer, Product Manager). Strict matching unlike the general search query.",
+      "editor": "stringList"
+    },
+    "industryIds": {
+      "title": "Industry IDs",
+      "type": "array",
+      "description": "Filter by LinkedIn industry IDs (numbers only). Example: 4 = Software Development, 43 = Financial Services. See full list: https://github.com/HarvestAPI/linkedin-industry-codes-v2",
+      "editor": "json",
+      "items": { "type": "integer" }
+    },
+    "yearsAtCurrentCompanyIds": {
+      "title": "Years at Current Company",
+      "type": "array",
+      "description": "Filter by years at current company. 1 = Less than 1 year, 2 = 1-2 years, 3 = 3-5 years, 4 = 6-10 years, 5 = More than 10 years.",
+      "editor": "json",
+      "items": { "type": "integer" }
+    },
+    "yearsOfExperienceIds": {
+      "title": "Years of Experience",
+      "type": "array",
+      "description": "Filter by total years of experience. 1 = Less than 1 year, 2 = 1-2 years, 3 = 3-5 years, 4 = 6-10 years, 5 = More than 10 years.",
+      "editor": "json",
+      "items": { "type": "integer" }
+    },
+    "seniorityLevelIds": {
+      "title": "Seniority Level",
+      "type": "array",
+      "description": "Filter by seniority level IDs. 100 = In Training, 110 = Entry Level, 120 = Senior, 130 = Strategic, 200 = Entry Level Manager, 210 = Experienced Manager, 220 = Director, 300 = VP, 310 = CXO, 320 = Owner/Partner.",
+      "editor": "json",
+      "items": { "type": "integer" }
+    },
+    "functionIds": {
+      "title": "Function / Department",
+      "type": "array",
+      "description": "Filter by LinkedIn function IDs. 1 = Accounting, 8 = Engineering, 13 = IT, 15 = Marketing, 25 = Sales, etc.",
+      "editor": "json",
+      "items": { "type": "integer" }
+    },
+    "companyHeadcount": {
+      "title": "Company Headcount",
+      "type": "array",
+      "description": "Filter by company size. A = Self-employed, B = 1-10, C = 11-50, D = 51-200, E = 201-500, F = 501-1000, G = 1001-5000, H = 5001-10000, I = 10001+.",
+      "editor": "json",
+      "items": { "type": "string" }
+    },
+    "maxItems": {
+      "title": "Maximum Profiles",
+      "type": "integer",
+      "description": "Maximum number of profiles to scrape. Set to 0 to scrape all available (up to 2500 per query). LinkedIn limits results to 2500 per search query.",
+      "default": 0,
+      "minimum": 0,
+      "sectionCaption": "Pagination & Limits"
+    },
+    "startPage": {
+      "title": "Start Page",
+      "type": "integer",
+      "description": "Start scraping from this search results page (1-based). Useful for resuming partial scrapes.",
+      "default": 1,
+      "minimum": 1
+    },
+    "companyBatchMode": {
+      "title": "Company Batch Mode",
+      "type": "string",
+      "description": "How to process multiple companies.\n- 'All at once': Single search with all companies (max 10, faster)\n- 'One by one': Separate search per company (up to 1000, more accurate)",
+      "editor": "select",
+      "default": "All at once",
+      "enum": ["All at once", "One by one"],
+      "enumTitles": [
+        "All at once — Single search, max 10 companies, faster",
+        "One by one — Separate search per company, up to 1000, more thorough"
+      ],
+      "sectionCaption": "Advanced"
+    },
+    "proxyConfiguration": {
+      "title": "Proxy Configuration",
+      "type": "object",
+      "description": "Proxy configuration for accessing LinkedIn. Residential proxies are strongly recommended.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": ["RESIDENTIAL"]
+      }
+    }
+  }
+}

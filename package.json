@@ -1,0 +1,22 @@
+{
+  "name": "linkedin-company-employees",
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Apify Actor to scrape LinkedIn company employees with filters and detailed profile information. No cookies or account required.",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "apify": "^3.2.6",
+    "crawlee": "^3.12.1"
+  },
+  "devDependencies": {
+    "typescript": "~5.6.0",
+    "@types/node": "^22.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start:prod": "node dist/main.js",
+    "start:dev": "npx tsx src/main.ts"
+  }
+}

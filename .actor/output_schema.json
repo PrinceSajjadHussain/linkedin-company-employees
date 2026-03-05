@@ -1,0 +1,31 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "firstName",
+          "lastName",
+          "headline",
+          "linkedinUrl",
+          "location",
+          "currentPosition",
+          "email"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "firstName": { "label": "First Name", "format": "text" },
+          "lastName": { "label": "Last Name", "format": "text" },
+          "headline": { "label": "Headline", "format": "text" },
+          "linkedinUrl": { "label": "LinkedIn URL", "format": "link" },
+          "email": { "label": "Email", "format": "text" }
+        }
+      }
+    }
+  },
+  "description": "Extracted LinkedIn employee profiles with optional detailed data and email search."
+}

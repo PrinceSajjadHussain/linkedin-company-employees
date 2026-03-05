@@ -1,0 +1,42 @@
+{
+  "actorSpecification": 1,
+  "name": "linkedin-company-employees",
+  "title": "LinkedIn Company Employees Scraper",
+  "description": "Extract all LinkedIn Company employees with filters and detailed profile information, including complete work experience, education, skills, and more. No cookies or account required. Optional email search.",
+  "version": "0.0.1",
+  "input": "./INPUT_SCHEMA.json",
+  "output": "./output_schema.json",
+  "dockerfile": "../Dockerfile",
+  "storages": {
+    "dataset": {
+      "actorSpecification": 1,
+      "title": "LinkedIn Employees",
+      "views": {
+        "employees": {
+          "title": "Employees",
+          "transformation": {
+            "fields": [
+              "firstName",
+              "lastName",
+              "headline",
+              "linkedinUrl",
+              "location",
+              "currentPosition",
+              "email"
+            ]
+          },
+          "display": {
+            "component": "table",
+            "properties": {
+              "firstName": { "label": "First Name", "format": "text" },
+              "lastName": { "label": "Last Name", "format": "text" },
+              "headline": { "label": "Headline", "format": "text" },
+              "linkedinUrl": { "label": "LinkedIn URL", "format": "link" },
+              "email": { "label": "Email", "format": "text" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

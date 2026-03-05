@@ -1,0 +1,688 @@
+import { log } from 'apify';
+import { ProxyConfiguration } from 'apify';
+import {
+    LINKEDIN_BASE,
+    VOYAGER_BASE,
+    LINKEDIN_HEADERS,
+    RESULTS_PER_PAGE,
+    MONTHS,
+} from './constants.js';
+import {
+    extractCsrfToken,
+    parseCookies,
+    delay,
+    randomDelay,
+    withRetry,
+    parseLocation,
+    formatDateInfo,
+    formatDuration,
+    buildProfileUrl,
+    buildCompanyUrl,
+    findIncludedByType,
+    decodeHtmlEntities,
+    extractCodeJsonBlobs,
+} from './utils.js';
+import type {
+    CompanyInfo,
+    ProfileData,
+    ProfileShort,
+    SearchResult,
+    PaginationInfo,
+    SearchQuery,
+    ExperienceEntry,
+    EducationEntry,
+    CertificationEntry,
+    SkillEntry,
+    CurrentPosition,
+} from './types.js';
+
+// ─── HTTP fetch with proxy support ───────────────────────────────────────────
+
+async function fetchWithProxy(
+    url: string,
+    options: RequestInit,
+    proxyUrl?: string,
+): Promise<Response> {
+    // In Apify environment, proxy is handled via HTTPS_PROXY env var
+    // set by the ProxyConfiguration. We use globalThis.fetch directly.
+    return globalThis.fetch(url, options);
+}
+
+// ─── LinkedIn Client ─────────────────────────────────────────────────────────
+
+export class LinkedInClient {
+    private csrfToken = '';
+    private cookies = '';
+    private proxyConfig?: ProxyConfiguration;
+    private sessionValid = false;
+
+    constructor(proxyConfig?: ProxyConfiguration) {
+        this.proxyConfig = proxyConfig;
+    }
+
+    /** Initialize a guest session by visiting LinkedIn and extracting CSRF token. */
+    async initSession(): Promise<void> {
+        log.info('Initializing LinkedIn guest session...');
+        const proxyUrl = this.proxyConfig ? await this.proxyConfig.newUrl() : undefined;
+
+        const resp = await fetchWithProxy(
+            LINKEDIN_BASE,
+            {
+                method: 'GET',
+                headers: {
+                    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'accept-language': 'en-US,en;q=0.9',
+                },
+                redirect: 'follow',
+            },
+            proxyUrl,
+        );
+
+        const setCookies = resp.headers.getSetCookie?.() || [];
+        this.cookies = parseCookies(setCookies);
+        this.csrfToken = extractCsrfToken(this.cookies);
+
+        if (!this.csrfToken) {
+            // Try to extract from response body
+            const body = await resp.text();
+            const match = body.match(/JSESSIONID.*?["']([^"']+)["']/);
+            if (match) {
+                this.csrfToken = match[1];
+                this.cookies += `; JSESSIONID="${this.csrfToken}"`;
+            }
+        }
+
+        // Also add consent cookie
+        if (!this.cookies.includes('li_at')) {
+            this.cookies += '; bcookie="v=2&aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"; li_gc=1; lang=en_US';
+        }
+
+        this.sessionValid = !!this.csrfToken;
+        log.info(`Session initialized. CSRF token: ${this.csrfToken ? 'obtained' : 'MISSING'}`);
+    }
+
+    /** Get default headers for Voyager API requests. */
+    private getHeaders(): Record<string, string> {
+        return {
+            ...LINKEDIN_HEADERS,
+            'csrf-token': this.csrfToken,
+            'cookie': this.cookies,
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        };
+    }
+
+    /** Make a Voyager API request. */
+    private async voyagerGet(endpoint: string): Promise<any> {
+        const url = `${VOYAGER_BASE}/${endpoint}`;
+        const proxyUrl = this.proxyConfig ? await this.proxyConfig.newUrl() : undefined;
+
+        const resp = await fetchWithProxy(url, {
+            method: 'GET',
+            headers: this.getHeaders(),
+            redirect: 'follow',
+        }, proxyUrl);
+
+        if (resp.status === 429) {
+            throw new Error('RATE_LIMITED');
+        }
+
+        if (resp.status === 401 || resp.status === 403) {
+            throw new Error(`AUTH_REQUIRED: ${resp.status}`);
+        }
+
+        if (!resp.ok) {
+            throw new Error(`Voyager API error: ${resp.status} ${resp.statusText}`);
+        }
+
+        return resp.json();
+    }
+
+    /** Make an HTML page request. */
+    private async htmlGet(url: string): Promise<string> {
+        const proxyUrl = this.proxyConfig ? await this.proxyConfig.newUrl() : undefined;
+
+        const resp = await fetchWithProxy(url, {
+            method: 'GET',
+            headers: {
+                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'accept-language': 'en-US,en;q=0.9',
+                'cookie': this.cookies,
+            },
+            redirect: 'follow',
+        }, proxyUrl);
+
+        if (resp.status === 429) throw new Error('RATE_LIMITED');
+        return resp.text();
+    }
+
+    // ─── Company Resolution ──────────────────────────────────────────────────
+
+    /** Resolve a company name or URL to a CompanyInfo object. */
+    async resolveCompany(nameOrUrl: string): Promise<CompanyInfo> {
+        const identifier = nameOrUrl.trim().replace(/\/$/, '');
+        // Extract universal name from URL
+        const urlMatch = identifier.match(/linkedin\.com\/company\/([^/?#]+)/i);
+        const universalName = urlMatch ? urlMatch[1].toLowerCase() : identifier.toLowerCase().replace(/\s+/g, '-');
+
+        log.info(`Resolving company: ${universalName}`);
+
+        // Try Voyager API first
+        try {
+            const data = await this.voyagerGet(
+                `organization/companies?decorationId=com.linkedin.voyager.deco.organization.web.WebFullCompanyMain-38&q=universalName&universalName=${encodeURIComponent(universalName)}`,
+            );
+
+            if (data?.elements?.[0]) {
+                const company = data.elements[0];
+                return {
+                    universalName: company.universalName || universalName,
+                    companyId: String(company.entityUrn?.split(':').pop() || company.objectUrn?.split(':').pop() || ''),
+                    name: company.name || universalName,
+                    domain: company.companyPageUrl || company.websiteUrl || '',
+                    employeeCount: company.staffCount || company.staffCountRange?.start || 0,
+                    linkedinUrl: buildCompanyUrl(company.universalName || universalName),
+                };
+            }
+        } catch (err: any) {
+            log.debug(`Voyager company lookup failed: ${err.message}`);
+        }
+
+        // Fallback: scrape the company page HTML
+        try {
+            const html = await this.htmlGet(`${LINKEDIN_BASE}/company/${encodeURIComponent(universalName)}/`);
+
+            // Try to find company ID from HTML
+            const companyIdMatch = html.match(/companyId['":\s]+(\d+)/);
+            const nameMatch = html.match(/<title>([^<|]+)/);
+            const staffMatch = html.match(/(\d[\d,]+)\s+employees?\s+on\s+LinkedIn/i);
+
+            return {
+                universalName,
+                companyId: companyIdMatch ? companyIdMatch[1] : '',
+                name: nameMatch ? decodeHtmlEntities(nameMatch[1].trim()) : universalName,
+                employeeCount: staffMatch ? parseInt(staffMatch[1].replace(/,/g, ''), 10) : 0,
+                linkedinUrl: buildCompanyUrl(universalName),
+            };
+        } catch (err: any) {
+            log.warning(`Failed to resolve company "${nameOrUrl}": ${err.message}`);
+            return {
+                universalName,
+                companyId: '',
+                name: nameOrUrl,
+                linkedinUrl: buildCompanyUrl(universalName),
+            };
+        }
+    }
+
+    // ─── Employee Search ─────────────────────────────────────────────────────
+
+    /** Build Voyager search URL with filters. */
+    private buildSearchUrl(query: SearchQuery, page: number): string {
+        const start = (page - 1) * RESULTS_PER_PAGE;
+        const params = new globalThis.URL(`${VOYAGER_BASE}/search/dash/clusters`);
+
+        // Build query parameters for the search
+        const queryParams: Array<string> = [];
+
+        if (query.currentCompanies?.length) {
+            const companyList = query.currentCompanies.map((c) => `"${c}"`).join(',');
+            queryParams.push(`currentCompany:List(${companyList})`);
+        }
+
+        if (query.locations?.length) {
+            const locationList = query.locations.map((l) => `"${l}"`).join(',');
+            queryParams.push(`geoUrn:List(${locationList})`);
+        }
+
+        if (query.currentJobTitles?.length) {
+            const titleList = query.currentJobTitles.map((t) => `"${t}"`).join(',');
+            queryParams.push(`title:List(${titleList})`);
+        }
+
+        if (query.industryIds?.length) {
+            const industryList = query.industryIds.join(',');
+            queryParams.push(`industry:List(${industryList})`);
+        }
+
+        if (query.seniorityLevelIds?.length) {
+            const seniorityList = query.seniorityLevelIds.join(',');
+            queryParams.push(`seniorityLevel:List(${seniorityList})`);
+        }
+
+        if (query.functionIds?.length) {
+            const functionList = query.functionIds.join(',');
+            queryParams.push(`function:List(${functionList})`);
+        }
+
+        if (query.yearsAtCurrentCompanyIds?.length) {
+            const yearsList = query.yearsAtCurrentCompanyIds.join(',');
+            queryParams.push(`yearsAtCurrentCompany:List(${yearsList})`);
+        }
+
+        if (query.yearsOfExperienceIds?.length) {
+            const expList = query.yearsOfExperienceIds.join(',');
+            queryParams.push(`yearsOfExperience:List(${expList})`);
+        }
+
+        if (query.companyHeadcount?.length) {
+            const headcountList = query.companyHeadcount.join(',');
+            queryParams.push(`companyHqGeo:List(${headcountList})`);
+        }
+
+        queryParams.push('resultType:List(PEOPLE)');
+
+        const queryString = queryParams.length > 0
+            ? `(${queryParams.join(',')}${query.keywords ? `,keywords:${encodeURIComponent(query.keywords)}` : ''},includeFiltersInResponse:true)`
+            : `(resultType:List(PEOPLE)${query.keywords ? `,keywords:${encodeURIComponent(query.keywords)}` : ''},includeFiltersInResponse:true)`;
+
+        return `search/dash/clusters?decorationId=com.linkedin.voyager.dash.deco.search.SearchClusterCollection-174&origin=COMPANY_PAGE_CANNED_SEARCH&q=all&query=(flagshipSearchIntent:SEARCH_SRP,queryParameters:${queryString})&count=${RESULTS_PER_PAGE}&start=${start}`;
+    }
+
+    /** Search for company employees using Voyager API. */
+    async searchEmployees(query: SearchQuery, page: number): Promise<SearchResult> {
+        const endpoint = this.buildSearchUrl(query, page);
+        log.debug(`Searching employees: page ${page}`);
+
+        try {
+            const data = await withRetry(
+                () => this.voyagerGet(endpoint),
+                3,
+                3000,
+                `Search page ${page}`,
+            );
+
+            return this.parseSearchResults(data, page);
+        } catch (err: any) {
+            if (err.message === 'RATE_LIMITED') throw err;
+            log.warning(`Voyager search failed, trying HTML fallback: ${err.message}`);
+            return this.searchEmployeesHtml(query, page);
+        }
+    }
+
+    /** Fallback: search employees via HTML page scraping. */
+    private async searchEmployeesHtml(query: SearchQuery, page: number): Promise<SearchResult> {
+        const start = (page - 1) * RESULTS_PER_PAGE;
+        const params = new globalThis.URLSearchParams();
+
+        if (query.currentCompanies?.length) {
+            params.set('currentCompany', JSON.stringify(query.currentCompanies));
+        }
+        if (query.keywords) {
+            params.set('keywords', query.keywords);
+        }
+        if (query.locations?.length) {
+            params.set('geoUrn', JSON.stringify(query.locations));
+        }
+        params.set('origin', 'COMPANY_PAGE_CANNED_SEARCH');
+        params.set('start', String(start));
+
+        const searchUrl = `${LINKEDIN_BASE}/search/results/people/?${params.toString()}`;
+        const html = await this.htmlGet(searchUrl);
+
+        // Extract data from embedded JSON in <code> tags
+        const blobs = extractCodeJsonBlobs(html);
+        const profiles: Array<ProfileShort> = [];
+        let totalCount = 0;
+
+        for (const blob of blobs) {
+            if (blob?.included) {
+                // Find profile entities
+                const profileEntities = findIncludedByType(blob.included, 'MiniProfile');
+                for (const p of profileEntities) {
+                    if (p.publicIdentifier && p.publicIdentifier !== 'UNKNOWN') {
+                        profiles.push({
+                            publicIdentifier: p.publicIdentifier,
+                            linkedinUrl: buildProfileUrl(p.publicIdentifier),
+                            firstName: p.firstName || '',
+                            lastName: p.lastName || '',
+                            headline: p.occupation || p.headline || '',
+                            location: parseLocation(p.locationName),
+                            photo: p.picture?.rootUrl
+                                ? `${p.picture.rootUrl}${p.picture.artifacts?.[p.picture.artifacts.length - 1]?.fileIdentifyingUrlPathSegment || ''}`
+                                : null,
+                        });
+                    }
+                }
+
+                // Find total count
+                if (blob.data?.paging?.total) {
+                    totalCount = blob.data.paging.total;
+                } else if (blob.data?.metadata?.totalResultCount) {
+                    totalCount = blob.data.metadata.totalResultCount;
+                }
+            }
+        }
+
+        // Try extracting from __NEXT_DATA__ or other script tags
+        if (profiles.length === 0) {
+            const totalMatch = html.match(/(\d[\d,]*)\s+results?/i);
+            if (totalMatch) {
+                totalCount = parseInt(totalMatch[1].replace(/,/g, ''), 10);
+            }
+        }
+
+        const totalPages = Math.ceil(totalCount / RESULTS_PER_PAGE);
+
+        return {
+            profiles,
+            pagination: {
+                pageNumber: page,
+                totalElements: totalCount,
+                totalPages,
+                itemsPerPage: RESULTS_PER_PAGE,
+            },
+        };
+    }
+
+    /** Parse Voyager API search response into SearchResult. */
+    private parseSearchResults(data: any, page: number): SearchResult {
+        const profiles: Array<ProfileShort> = [];
+        let totalCount = 0;
+
+        // Extract total count from paging
+        if (data?.paging?.total != null) {
+            totalCount = data.paging.total;
+        } else if (data?.metadata?.totalResultCount != null) {
+            totalCount = data.metadata.totalResultCount;
+        }
+
+        // Parse included entities for mini profiles
+        const included = data?.included || [];
+        const miniProfiles = findIncludedByType(included, 'MiniProfile');
+
+        for (const mp of miniProfiles) {
+            if (!mp.publicIdentifier || mp.publicIdentifier === 'UNKNOWN') continue;
+
+            const photoUrl = mp.picture?.rootUrl
+                ? `${mp.picture.rootUrl}${mp.picture.artifacts?.[mp.picture.artifacts.length - 1]?.fileIdentifyingUrlPathSegment || ''}`
+                : null;
+
+            profiles.push({
+                publicIdentifier: mp.publicIdentifier,
+                linkedinUrl: buildProfileUrl(mp.publicIdentifier),
+                firstName: mp.firstName || '',
+                lastName: mp.lastName || '',
+                headline: mp.occupation || mp.headline || '',
+                location: parseLocation(mp.locationName),
+                photo: photoUrl,
+            });
+        }
+
+        // Also check elements array for search results
+        if (profiles.length === 0 && data?.elements) {
+            for (const cluster of data.elements) {
+                const items = cluster?.items || [];
+                for (const item of items) {
+                    const entity = item?.item?.entityResult;
+                    if (!entity) continue;
+                    const title = entity.title?.text || '';
+                    const nameParts = title.split(' ');
+                    const firstName = nameParts[0] || '';
+                    const lastName = nameParts.slice(1).join(' ') || '';
+
+                    const urn = entity.entityUrn || '';
+                    const idMatch = urn.match(/\(([^,)]+)/);
+                    const publicId = entity.navigationUrl?.match(/\/in\/([^/?]+)/)?.[1] || '';
+
+                    profiles.push({
+                        publicIdentifier: publicId,
+                        linkedinUrl: publicId ? buildProfileUrl(publicId) : '',
+                        firstName,
+                        lastName,
+                        headline: entity.primarySubtitle?.text || entity.summary?.text || '',
+                        location: parseLocation(entity.secondarySubtitle?.text),
+                        photo: entity.image?.attributes?.[0]?.detailData?.nonEntityProfilePicture?.vectorImage?.rootUrl || null,
+                    });
+                }
+            }
+        }
+
+        const totalPages = Math.ceil(totalCount / RESULTS_PER_PAGE);
+
+        return {
+            profiles,
+            pagination: {
+                pageNumber: page,
+                totalElements: totalCount,
+                totalPages,
+                itemsPerPage: RESULTS_PER_PAGE,
+            },
+        };
+    }
+
+    // ─── Full Profile Scraping ───────────────────────────────────────────────
+
+    /** Get full profile data for a given public identifier. */
+    async getFullProfile(publicIdentifier: string): Promise<ProfileData> {
+        log.debug(`Fetching full profile: ${publicIdentifier}`);
+
+        // Try Voyager API first
+        try {
+            const data = await this.voyagerGet(
+                `identity/profiles/${encodeURIComponent(publicIdentifier)}/profileView`,
+            );
+            return this.parseVoyagerProfile(data, publicIdentifier);
+        } catch (err: any) {
+            log.debug(`Voyager profile fetch failed: ${err.message}`);
+        }
+
+        // Fallback to HTML scraping
+        return this.getProfileFromHtml(publicIdentifier);
+    }
+
+    /** Parse Voyager API profile response. */
+    private parseVoyagerProfile(data: any, publicIdentifier: string): ProfileData {
+        const profile = data?.profile || {};
+        const included = data?.included || [];
+
+        // Extract experience
+        const positions = findIncludedByType(included, 'Position');
+        const experience: Array<ExperienceEntry> = positions.map((pos) => {
+            const company = pos.companyName || pos.company?.name || '';
+            const companyUrn = pos.companyUrn || pos.company?.entityUrn || '';
+            const companyIdMatch = companyUrn.match(/:(\d+)$/);
+
+            return {
+                position: pos.title || '',
+                location: pos.locationName || '',
+                employmentType: pos.employmentType?.replace(/_/g, ' ')?.replace(/\b\w/g, (c: string) => c.toUpperCase()) || '',
+                companyName: company,
+                companyLinkedinUrl: companyIdMatch
+                    ? buildCompanyUrl(companyIdMatch[1])
+                    : `${LINKEDIN_BASE}/search/results/all/?keywords=${encodeURIComponent(company)}`,
+                companyId: companyIdMatch?.[1] || '',
+                duration: '',
+                description: pos.description || '',
+                startDate: formatDateInfo(pos.timePeriod?.startDate),
+                endDate: pos.timePeriod?.endDate ? formatDateInfo(pos.timePeriod.endDate) : { text: 'Present' },
+            } as ExperienceEntry;
+        });
+
+        // Calculate durations for experience
+        for (const exp of experience) {
+            exp.duration = formatDuration(exp.startDate, exp.endDate);
+        }
+
+        // Extract education
+        const educations = findIncludedByType(included, 'Education');
+        const education: Array<EducationEntry> = educations.map((edu) => {
+            const start = formatDateInfo(edu.timePeriod?.startDate);
+            const end = formatDateInfo(edu.timePeriod?.endDate);
+            return {
+                schoolName: edu.schoolName || edu.school?.name || '',
+                schoolLinkedinUrl: edu.school?.entityUrn
+                    ? buildCompanyUrl(edu.school.entityUrn.split(':').pop())
+                    : '',
+                degree: edu.degreeName || '',
+                fieldOfStudy: edu.fieldOfStudy || null,
+                startDate: start,
+                endDate: end,
+                period: start?.text && end?.text ? `${start.text} - ${end.text}` : '',
+            };
+        });
+
+        // Extract skills
+        const skillEntities = findIncludedByType(included, 'Skill');
+        const skills: Array<SkillEntry> = skillEntities.map((s) => ({
+            name: s.name || '',
+        }));
+
+        // Extract certifications
+        const certEntities = findIncludedByType(included, 'Certification');
+        const certifications: Array<CertificationEntry> = certEntities.map((c) => ({
+            title: c.name || '',
+            issuedBy: c.authority || '',
+            issuedAt: c.timePeriod?.startDate
+                ? `Issued ${MONTHS[c.timePeriod.startDate.month] || ''} ${c.timePeriod.startDate.year || ''}`.trim()
+                : '',
+        }));
+
+        // Extract languages
+        const langEntities = findIncludedByType(included, 'Language');
+        const languages = langEntities.map((l: any) => ({
+            name: l.name || '',
+            proficiency: l.proficiency?.replace(/_/g, ' ')?.toLowerCase()?.replace(/\b\w/g, (c: string) => c.toUpperCase()) || '',
+        }));
+
+        // Build current position
+        const currentPosition: Array<CurrentPosition> = experience
+            .filter((e) => e.endDate?.text === 'Present')
+            .map((e) => ({ companyName: e.companyName || '' }));
+
+        // Build top skills string
+        const topSkills = skills.slice(0, 3).map((s) => s.name).join(' • ');
+
+        return {
+            publicIdentifier,
+            linkedinUrl: buildProfileUrl(publicIdentifier),
+            firstName: profile.firstName || '',
+            lastName: profile.lastName || '',
+            headline: profile.headline || '',
+            about: profile.summary || null,
+            openToWork: false,
+            hiring: false,
+            photo: profile.displayPictureUrl
+                ? `${profile.displayPictureUrl}${profile.img_800_800 || profile.img_400_400 || ''}`
+                : null,
+            premium: profile.premium || false,
+            influencer: profile.influencer || false,
+            location: parseLocation(profile.locationName || profile.geoLocationName),
+            connectionsCount: profile.connectionsCount || 0,
+            followerCount: profile.followersCount || 0,
+            currentPosition,
+            topSkills,
+            experience,
+            education,
+            certifications,
+            skills,
+            languages,
+            projects: [],
+            volunteering: [],
+            courses: [],
+            publications: [],
+            patents: [],
+            honorsAndAwards: [],
+            receivedRecommendations: [],
+            moreProfiles: [],
+        };
+    }
+
+    /** Fallback: get profile data by scraping the public HTML page. */
+    private async getProfileFromHtml(publicIdentifier: string): Promise<ProfileData> {
+        const url = buildProfileUrl(publicIdentifier);
+        const html = await this.htmlGet(url);
+
+        const profile: ProfileData = {
+            publicIdentifier,
+            linkedinUrl: url,
+            firstName: '',
+            lastName: '',
+            headline: '',
+            about: null,
+        };
+
+        // Extract from JSON-LD
+        const jsonLdMatch = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
+        if (jsonLdMatch) {
+            try {
+                const jsonLd = JSON.parse(jsonLdMatch[1]);
+                if (jsonLd['@type'] === 'Person') {
+                    profile.firstName = jsonLd.givenName || '';
+                    profile.lastName = jsonLd.familyName || '';
+                    profile.headline = jsonLd.jobTitle || '';
+                    profile.about = jsonLd.description || null;
+                    profile.location = parseLocation(
+                        jsonLd.address?.addressLocality
+                            ? `${jsonLd.address.addressLocality}, ${jsonLd.address.addressCountry || ''}`
+                            : '',
+                    );
+                    profile.photo = jsonLd.image?.contentUrl || null;
+
+                    if (jsonLd.alumniOf) {
+                        const eduArray = Array.isArray(jsonLd.alumniOf) ? jsonLd.alumniOf : [jsonLd.alumniOf];
+                        profile.education = eduArray.map((e: any) => ({
+                            schoolName: e.name || '',
+                        }));
+                    }
+
+                    if (jsonLd.worksFor) {
+                        const workArray = Array.isArray(jsonLd.worksFor) ? jsonLd.worksFor : [jsonLd.worksFor];
+                        profile.currentPosition = workArray.map((w: any) => ({
+                            companyName: w.name || '',
+                        }));
+                        profile.experience = workArray.map((w: any) => ({
+                            position: jsonLd.jobTitle || '',
+                            companyName: w.name || '',
+                        }));
+                    }
+                }
+            } catch {
+                log.debug('Failed to parse JSON-LD from profile page');
+            }
+        }
+
+        // Also try code blobs
+        const blobs = extractCodeJsonBlobs(html);
+        for (const blob of blobs) {
+            if (blob?.included) {
+                const miniProfiles = findIncludedByType(blob.included, 'MiniProfile');
+                const mp = miniProfiles.find((p: any) => p.publicIdentifier === publicIdentifier);
+                if (mp) {
+                    profile.firstName = mp.firstName || profile.firstName;
+                    profile.lastName = mp.lastName || profile.lastName;
+                    profile.headline = mp.occupation || profile.headline;
+                }
+            }
+        }
+
+        // Extract name from title tag as fallback
+        if (!profile.firstName) {
+            const titleMatch = html.match(/<title>([^<|–]+)/);
+            if (titleMatch) {
+                const name = decodeHtmlEntities(titleMatch[1].trim());
+                const parts = name.split(' ');
+                profile.firstName = parts[0] || '';
+                profile.lastName = parts.slice(1).join(' ') || '';
+            }
+        }
+
+        return profile;
+    }
+
+    /** Get short profile data (name, headline, location, current position). */
+    async getShortProfile(publicIdentifier: string): Promise<ProfileShort> {
+        const full = await this.getFullProfile(publicIdentifier);
+        return {
+            publicIdentifier: full.publicIdentifier,
+            linkedinUrl: full.linkedinUrl,
+            firstName: full.firstName,
+            lastName: full.lastName,
+            headline: full.headline,
+            location: full.location,
+            currentPosition: full.currentPosition,
+            photo: full.photo,
+        };
+    }
+}
