@@ -8,21 +8,13 @@ export const MAX_RESULTS_PER_QUERY = 2500;
 
 // ─── HTTP Headers for LinkedIn Requests ──────────────────────────────────────
 export const LINKEDIN_HEADERS: Record<string, string> = {
-    'accept': 'application/vnd.linkedin.normalized+json+2.1',
-    'accept-language': 'en-US,en;q=0.9',
+    'accept-language': 'en-AU,en-GB;q=0.9,en-US;q=0.8,en;q=0.7',
     'x-li-lang': 'en_US',
     'x-restli-protocol-version': '2.0.0',
-    'x-li-page-instance': 'urn:li:page:d_flagship3_search_srp_people;0',
-    'x-li-track': JSON.stringify({
-        clientVersion: '1.13.1234',
-        mpVersion: '1.13.1234',
-        osName: 'web',
-        timezoneOffset: -5,
-        timezone: 'America/New_York',
-        deviceFormFactor: 'DESKTOP',
-        mpName: 'voyager-web',
-    }),
 };
+
+// GraphQL query ID for people search (from linkedin-api v2.3.1)
+export const SEARCH_QUERY_ID = 'voyagerSearchDashClusters.b0928897b71bd00a5a7291755dcd64f0';
 
 // ─── Seniority Level Map ─────────────────────────────────────────────────────
 export const SENIORITY_LEVELS: Record<number, string> = {

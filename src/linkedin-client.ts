@@ -7,6 +7,7 @@ import {
     LINKEDIN_HEADERS,
     RESULTS_PER_PAGE,
     MONTHS,
+    SEARCH_QUERY_ID,
 } from './constants.js';
 import {
     extractCsrfToken,
@@ -98,7 +99,7 @@ export class LinkedInClient {
         // Fetch LinkedIn to get JSESSIONID / CSRF token
         const resp = await this.httpGet(`${LINKEDIN_BASE}/feed/`, {
             'user-agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             accept:
                 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'accept-language': 'en-US,en;q=0.9',
@@ -157,7 +158,7 @@ export class LinkedInClient {
             'csrf-token': this.csrfToken,
             cookie: this.cookies,
             'user-agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         };
     }
 
@@ -200,7 +201,7 @@ export class LinkedInClient {
     private async htmlGet(url: string): Promise<string> {
         const resp = await this.httpGet(url, {
             'user-agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             accept:
                 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'accept-language': 'en-US,en;q=0.9',
@@ -378,58 +379,75 @@ export class LinkedInClient {
 
     // ─── Employee Search ─────────────────────────────────────────────────────
 
-    /** Build Voyager search URL with filters. */
-    private buildSearchUrl(query: SearchQuery, page: number): string {
-        const start = (page - 1) * RESULTS_PER_PAGE;
+    /** Build filters in (key:...,value:List(...)) format for GraphQL search. */
+    private buildSearchFilters(query: SearchQuery): string {
+        const filters: string[] = [];
 
-        // Build query parameters
-        const qp: string[] = [];
+        // Always filter to PEOPLE results
+        filters.push('(key:resultType,value:List(PEOPLE))');
 
         if (query.currentCompanies?.length) {
-            qp.push(
-                `currentCompany:List(${query.currentCompanies.join(',')})`,
-            );
+            const joined = query.currentCompanies.join(' | ');
+            filters.push(`(key:currentCompany,value:List(${joined}))`);
         }
         if (query.locations?.length) {
-            qp.push(`geoUrn:List(${query.locations.join(',')})`);
+            const joined = query.locations.join(' | ');
+            filters.push(`(key:geoUrn,value:List(${joined}))`);
         }
         if (query.currentJobTitles?.length) {
-            qp.push(`title:List(${query.currentJobTitles.join(',')})`);
+            const joined = query.currentJobTitles.join(' | ');
+            filters.push(`(key:title,value:List(${joined}))`);
         }
         if (query.industryIds?.length) {
-            qp.push(`industry:List(${query.industryIds.join(',')})`);
+            const joined = query.industryIds.join(' | ');
+            filters.push(`(key:industry,value:List(${joined}))`);
         }
         if (query.seniorityLevelIds?.length) {
-            qp.push(
-                `seniorityLevel:List(${query.seniorityLevelIds.join(',')})`,
-            );
+            const joined = query.seniorityLevelIds.join(' | ');
+            filters.push(`(key:seniorityLevel,value:List(${joined}))`);
         }
         if (query.functionIds?.length) {
-            qp.push(`function:List(${query.functionIds.join(',')})`);
+            const joined = query.functionIds.join(' | ');
+            filters.push(`(key:function,value:List(${joined}))`);
         }
         if (query.yearsAtCurrentCompanyIds?.length) {
-            qp.push(
-                `yearsAtCurrentCompany:List(${query.yearsAtCurrentCompanyIds.join(',')})`,
-            );
+            const joined = query.yearsAtCurrentCompanyIds.join(' | ');
+            filters.push(`(key:yearsAtCurrentCompany,value:List(${joined}))`);
         }
         if (query.yearsOfExperienceIds?.length) {
-            qp.push(
-                `yearsOfExperience:List(${query.yearsOfExperienceIds.join(',')})`,
-            );
+            const joined = query.yearsOfExperienceIds.join(' | ');
+            filters.push(`(key:yearsOfExperience,value:List(${joined}))`);
         }
         if (query.companyHeadcount?.length) {
-            qp.push(
-                `companySize:List(${query.companyHeadcount.join(',')})`,
-            );
+            const joined = query.companyHeadcount.join(' | ');
+            filters.push(`(key:companySize,value:List(${joined}))`);
         }
 
-        qp.push('resultType:List(PEOPLE)');
+        return `List(${filters.join(',')})`;
+    }
+
+    /** Build GraphQL search URL (matching linkedin-api v2.3.1 format). */
+    private buildGraphQLSearchUrl(query: SearchQuery, page: number): string {
+        const start = (page - 1) * RESULTS_PER_PAGE;
+        const filters = this.buildSearchFilters(query);
 
         const keywords = query.keywords
-            ? `,keywords:${encodeURIComponent(query.keywords)}`
+            ? `keywords:${query.keywords},`
             : '';
 
-        return `search/dash/clusters?decorationId=com.linkedin.voyager.dash.deco.search.SearchClusterCollection-228&origin=FACETED_SEARCH&q=all&query=(flagshipSearchIntent:SEARCH_SRP${keywords},(includeFiltersInResponse:true),queryParameters:(${qp.join(',')}))&count=${RESULTS_PER_PAGE}&start=${start}`;
+        return `graphql?variables=(start:${start},origin:GLOBAL_SEARCH_HEADER,query:(${keywords}flagshipSearchIntent:SEARCH_SRP,queryParameters:${filters},includeFiltersInResponse:false))&queryId=${SEARCH_QUERY_ID}`;
+    }
+
+    /** Build legacy REST search URL (fallback). */
+    private buildLegacySearchUrl(query: SearchQuery, page: number): string {
+        const start = (page - 1) * RESULTS_PER_PAGE;
+        const filters = this.buildSearchFilters(query);
+
+        const keywords = query.keywords
+            ? `keywords:${query.keywords},`
+            : '';
+
+        return `search/dash/clusters?decorationId=com.linkedin.voyager.dash.deco.search.SearchClusterCollection-207&origin=GLOBAL_SEARCH_HEADER&q=all&query=(${keywords}flagshipSearchIntent:SEARCH_SRP,queryParameters:${filters},includeFiltersInResponse:false)&count=${RESULTS_PER_PAGE}&start=${start}`;
     }
 
     /** Log the structure of a Voyager API response for debugging. */
@@ -456,45 +474,42 @@ export class LinkedInClient {
         query: SearchQuery,
         page: number,
     ): Promise<SearchResult> {
-        const endpoint = this.buildSearchUrl(query, page);
-        log.debug(`Search endpoint: ${endpoint.substring(0, 200)}`);
-
-        // Decoration IDs to try (newest → oldest)
-        const decorationIds = [228, 218, 207, 200, 193, 186, 174, 165, 158];
-        // Origins to try
-        const origins = ['FACETED_SEARCH', 'COMPANY_PAGE_CANNED_SEARCH', 'SWITCH_SEARCH_VERTICAL', 'GLOBAL_SEARCH_HEADER'];
-
         let bestResult: SearchResult | null = null;
 
-        // Try primary endpoint first
+        // Strategy 1: GraphQL endpoint (matching linkedin-api v2.3.1)
+        const graphqlEndpoint = this.buildGraphQLSearchUrl(query, page);
+        log.debug(`GraphQL search: ${graphqlEndpoint.substring(0, 200)}`);
+
         try {
             const data = await withRetry(
-                () => this.voyagerGet(endpoint),
+                () => this.voyagerGet(graphqlEndpoint),
                 2,
                 3000,
-                `Search page ${page}`,
+                `GraphQL search page ${page}`,
             );
 
-            this.logResponseStructure(data, 'primary');
+            this.logResponseStructure(data, 'graphql');
             const result = this.parseSearchResults(data, page);
             if (result.profiles.length > 0) return result;
-            // Keep result for pagination info even if profiles are empty
             if (result.pagination.totalElements > 0) bestResult = result;
         } catch (err: any) {
             if (err.message === 'RATE_LIMITED') throw err;
-            log.warning(`Primary Voyager search failed: ${err.message}`);
+            log.warning(`GraphQL search failed: ${err.message}`);
         }
 
-        // Try alternate decoration IDs
+        // Strategy 2: Legacy REST endpoint with various decoration IDs
+        const legacyEndpoint = this.buildLegacySearchUrl(query, page);
+        const decorationIds = [228, 207, 193, 186, 174, 165];
+
         for (const decId of decorationIds) {
             try {
-                log.debug(`Trying decoration ID ${decId}...`);
-                const altEndpoint = endpoint.replace(
+                log.debug(`Trying legacy search with decoration ID ${decId}...`);
+                const altEndpoint = legacyEndpoint.replace(
                     /SearchClusterCollection-\d+/,
                     `SearchClusterCollection-${decId}`,
                 );
                 const data = await this.voyagerGet(altEndpoint);
-                this.logResponseStructure(data, `decId-${decId}`);
+                this.logResponseStructure(data, `legacy-${decId}`);
                 const result = this.parseSearchResults(data, page);
                 if (result.profiles.length > 0) return result;
                 if (!bestResult && result.pagination.totalElements > 0) {
@@ -502,43 +517,11 @@ export class LinkedInClient {
                 }
             } catch (err: any) {
                 if (err.message === 'RATE_LIMITED') throw err;
-                log.debug(`Decoration ${decId} failed: ${err.message}`);
+                log.debug(`Legacy decoration ${decId} failed: ${err.message}`);
             }
         }
 
-        // Try alternate origins with a mid-range decoration ID
-        for (const origin of origins) {
-            try {
-                log.debug(`Trying origin ${origin}...`);
-                const altEndpoint = endpoint
-                    .replace(/origin=[A-Z_]+/, `origin=${origin}`)
-                    .replace(/SearchClusterCollection-\d+/, 'SearchClusterCollection-207');
-                const data = await this.voyagerGet(altEndpoint);
-                this.logResponseStructure(data, `origin-${origin}`);
-                const result = this.parseSearchResults(data, page);
-                if (result.profiles.length > 0) return result;
-            } catch (err: any) {
-                if (err.message === 'RATE_LIMITED') throw err;
-                log.debug(`Origin ${origin} failed: ${err.message}`);
-            }
-        }
-
-        // Try without includeFiltersInResponse (older format)
-        try {
-            log.debug('Trying search without includeFiltersInResponse...');
-            const cleanEndpoint = endpoint
-                .replace(/,\(includeFiltersInResponse:true\)/, '')
-                .replace(/SearchClusterCollection-\d+/, 'SearchClusterCollection-207');
-            const data = await this.voyagerGet(cleanEndpoint);
-            this.logResponseStructure(data, 'no-filters');
-            const result = this.parseSearchResults(data, page);
-            if (result.profiles.length > 0) return result;
-        } catch (err: any) {
-            if (err.message === 'RATE_LIMITED') throw err;
-            log.debug(`No-filters search failed: ${err.message}`);
-        }
-
-        // HTML fallback
+        // Strategy 3: HTML fallback
         log.info('Trying HTML search fallback...');
         try {
             const htmlResult = await this.searchEmployeesHtml(query, page);
@@ -716,23 +699,6 @@ export class LinkedInClient {
         const seenIds = new Set<string>();
         let totalCount = 0;
 
-        // Extract total count from various locations
-        if (data?.paging?.total != null) totalCount = data.paging.total;
-        else if (data?.metadata?.totalResultCount != null)
-            totalCount = data.metadata.totalResultCount;
-
-        const included = data?.included || [];
-
-        // Log all entity types found in included for debugging
-        if (included.length > 0) {
-            const typeCounts: Record<string, number> = {};
-            for (const item of included) {
-                const t = (item['$type'] || item._type || 'unknown').split('.').pop() || 'unknown';
-                typeCounts[t] = (typeCounts[t] || 0) + 1;
-            }
-            log.info(`Response entity types: ${JSON.stringify(typeCounts)}`);
-        }
-
         const addProfile = (p: ProfileShort | null) => {
             if (p && p.publicIdentifier && !seenIds.has(p.publicIdentifier)) {
                 seenIds.add(p.publicIdentifier);
@@ -740,37 +706,101 @@ export class LinkedInClient {
             }
         };
 
-        // Method 1: MiniProfile / Profile entities in included
-        const profileTypes = ['MiniProfile', 'Profile', 'MemberProfile'];
-        for (const ptype of profileTypes) {
-            const entities = findIncludedByType(included, ptype);
-            if (entities.length > 0) {
-                log.info(`Found ${entities.length} ${ptype} entities`);
-                for (const mp of entities) {
-                    addProfile(this.extractProfileFromEntity(mp));
+        // ── Method 1: GraphQL response (data.searchDashClustersByAll) ──
+        // This is the format used by linkedin-api v2.3.1 GraphQL endpoint
+        const graphqlClusters = data?.data?.searchDashClustersByAll;
+        if (graphqlClusters) {
+            // Check type
+            const collType = graphqlClusters._type || graphqlClusters['$type'] || '';
+            log.debug(`GraphQL response type: ${collType}`);
+
+            // Get total from paging
+            if (graphqlClusters.paging?.total != null) {
+                totalCount = graphqlClusters.paging.total;
+            }
+
+            for (const cluster of graphqlClusters.elements || []) {
+                const clusterType = cluster._type || cluster['$type'] || '';
+                if (!clusterType.includes('SearchClusterViewModel') && !clusterType.includes('SearchCluster')) {
+                    continue;
+                }
+
+                for (const searchItem of cluster.items || []) {
+                    const itemType = searchItem._type || searchItem['$type'] || '';
+                    if (!itemType.includes('SearchItem') && itemType !== '') {
+                        // Allow empty type too
+                    }
+
+                    const entity = searchItem?.item?.entityResult;
+                    if (!entity) continue;
+
+                    const entityType = entity._type || entity['$type'] || '';
+                    if (entityType && !entityType.includes('EntityResultViewModel') && !entityType.includes('EntityResult')) {
+                        continue;
+                    }
+
+                    addProfile(this.extractProfileFromEntity(entity));
+                }
+
+                if (cluster?.metadata?.totalResultCount)
+                    totalCount = Math.max(totalCount, cluster.metadata.totalResultCount);
+            }
+
+            if (profiles.length > 0) {
+                log.info(`GraphQL parsed: ${profiles.length} profiles, total: ${totalCount}`);
+            }
+        }
+
+        // ── Method 2: Legacy REST response (included array) ──
+        const included = data?.included || [];
+
+        // Extract total count from top-level paging
+        if (totalCount === 0) {
+            if (data?.paging?.total != null) totalCount = data.paging.total;
+            else if (data?.metadata?.totalResultCount != null)
+                totalCount = data.metadata.totalResultCount;
+        }
+
+        // Log entity types for debugging
+        if (profiles.length === 0 && included.length > 0) {
+            const typeCounts: Record<string, number> = {};
+            for (const item of included) {
+                const t = (item['$type'] || item._type || 'unknown').split('.').pop() || 'unknown';
+                typeCounts[t] = (typeCounts[t] || 0) + 1;
+            }
+            log.info(`REST entity types: ${JSON.stringify(typeCounts)}`);
+        }
+
+        // 2a: MiniProfile / Profile entities in included
+        if (profiles.length === 0) {
+            for (const ptype of ['MiniProfile', 'Profile', 'MemberProfile']) {
+                const entities = findIncludedByType(included, ptype);
+                if (entities.length > 0) {
+                    log.info(`Found ${entities.length} ${ptype} entities`);
+                    for (const mp of entities) {
+                        addProfile(this.extractProfileFromEntity(mp));
+                    }
                 }
             }
         }
 
-        // Method 2: EntityResult / SearchProfile / ProfileResult in included
+        // 2b: EntityResult / EntityResultViewModel in included
         if (profiles.length === 0) {
-            const resultTypes = ['EntityResult', 'SearchProfile', 'ProfileResult', 'SearchHit', 'EntityResultViewModel'];
             for (const item of included) {
                 const t = item['$type'] || item._type || '';
-                if (resultTypes.some(rt => t.includes(rt))) {
+                if (t.includes('EntityResult') || t.includes('SearchProfile') || t.includes('ProfileResult') || t.includes('SearchHit')) {
                     addProfile(this.extractProfileFromEntity(item));
                 }
             }
             if (profiles.length > 0) {
-                log.info(`Found ${profiles.length} profiles from EntityResult-type entities`);
+                log.info(`Found ${profiles.length} profiles from EntityResult entities`);
             }
         }
 
-        // Method 3: elements → items → entityResult (cluster-based response)
+        // 2c: elements → items → entityResult (cluster-based REST response)
         if (profiles.length === 0 && data?.elements) {
             for (const cluster of data.elements) {
-                const items =
-                    cluster?.items || cluster?.results || cluster?.elements || [];
+                const items = cluster?.items || cluster?.results || cluster?.elements || [];
                 for (const item of items) {
                     const entity =
                         item?.item?.entityResult ||
@@ -780,8 +810,6 @@ export class LinkedInClient {
                         item;
                     addProfile(this.extractProfileFromEntity(entity));
                 }
-
-                // Extract total from cluster metadata
                 if (cluster?.metadata?.totalResultCount)
                     totalCount = Math.max(totalCount, cluster.metadata.totalResultCount);
                 if (cluster?.paging?.total)
@@ -792,36 +820,10 @@ export class LinkedInClient {
             }
         }
 
-        // Method 4: Direct data.results or data.data.searchDashClustersByAll
-        if (profiles.length === 0) {
-            const searchResults =
-                data?.data?.searchDashClustersByAll?.elements ||
-                data?.data?.searchDashClustersByAll?.results ||
-                data?.results ||
-                [];
-            for (const cluster of searchResults) {
-                const items = cluster?.items || cluster?.elements || [];
-                for (const item of items) {
-                    const entity =
-                        item?.item?.entityResult ||
-                        item?.item?.entity ||
-                        item?.entityResult ||
-                        item;
-                    addProfile(this.extractProfileFromEntity(entity));
-                }
-                if (cluster?.metadata?.totalResultCount)
-                    totalCount = Math.max(totalCount, cluster.metadata.totalResultCount);
-            }
-            if (profiles.length > 0) {
-                log.info(`Found ${profiles.length} profiles from nested data`);
-            }
-        }
-
-        // Method 5: Scan ALL included items as a last resort
+        // 2d: Broad scan as last resort
         if (profiles.length === 0 && included.length > 0) {
-            log.info('Attempting broad scan of all included entities...');
+            log.debug('Attempting broad scan of all included entities...');
             for (const item of included) {
-                // Look for anything that has a navigable profile URL or publicIdentifier
                 if (item.publicIdentifier || item.navigationUrl?.includes('/in/')) {
                     addProfile(this.extractProfileFromEntity(item));
                 }
@@ -831,7 +833,7 @@ export class LinkedInClient {
             }
         }
 
-        // Extract total from various paging locations
+        // Extract total from paging in elements
         if (totalCount === 0) {
             for (const el of data?.elements || []) {
                 if (el?.paging?.total) {
@@ -840,23 +842,20 @@ export class LinkedInClient {
             }
         }
 
-        const totalPages =
-            totalCount > 0
-                ? Math.ceil(totalCount / RESULTS_PER_PAGE)
-                : 0;
+        const totalPages = totalCount > 0 ? Math.ceil(totalCount / RESULTS_PER_PAGE) : 0;
 
-        log.info(
-            `Parsed: ${profiles.length} profiles, total: ${totalCount}, pages: ${totalPages}`,
-        );
+        log.info(`Parsed: ${profiles.length} profiles, total: ${totalCount}, pages: ${totalPages}`);
 
-        // If we have total count but no profiles, log a warning with sample data for debugging
-        if (totalCount > 0 && profiles.length === 0 && included.length > 0) {
-            const sample = included[0];
-            log.warning(
-                `API reports ${totalCount} results but could not parse profiles. ` +
-                `Sample entity type: ${sample['$type'] || sample._type || 'unknown'}. ` +
-                `Sample keys: ${JSON.stringify(Object.keys(sample).slice(0, 15))}`,
-            );
+        // Debug warning if total > 0 but no profiles parsed
+        if (totalCount > 0 && profiles.length === 0) {
+            const sampleSource = included.length > 0 ? included[0] : (graphqlClusters?.elements?.[0] || null);
+            if (sampleSource) {
+                log.warning(
+                    `API reports ${totalCount} results but parsed 0 profiles. ` +
+                    `Sample type: ${sampleSource['$type'] || sampleSource._type || 'unknown'}. ` +
+                    `Sample keys: ${JSON.stringify(Object.keys(sampleSource).slice(0, 15))}`,
+                );
+            }
         }
 
         return {
