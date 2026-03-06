@@ -4,3 +4,4 @@ storage
 apify_storage
 .vscode
 *.js.map
+PROJECT_DOCUMENTATION.md
