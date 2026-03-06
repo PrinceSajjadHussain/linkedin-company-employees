@@ -56,6 +56,7 @@ async function pushItem(item: any, eventName: string): Promise<void> {
 // ─── Main Entry ──────────────────────────────────────────────────────────────
 
 Actor.main(async () => {
+    log.setLevel(log.LEVELS.DEBUG);
     log.info('LinkedIn Company Employees Scraper starting...');
 
     // Read input

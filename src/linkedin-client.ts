@@ -137,15 +137,21 @@ export class LinkedInClient {
             redirect: 'follow',
         }, proxyUrl);
 
+        log.debug(`Voyager GET ${resp.status}: ${endpoint.substring(0, 80)}...`);
+
         if (resp.status === 429) {
             throw new Error('RATE_LIMITED');
         }
 
         if (resp.status === 401 || resp.status === 403) {
+            const body = await resp.text();
+            log.debug(`Auth error body (first 200 chars): ${body.substring(0, 200)}`);
             throw new Error(`AUTH_REQUIRED: ${resp.status}`);
         }
 
         if (!resp.ok) {
+            const body = await resp.text();
+            log.debug(`Error body (first 200 chars): ${body.substring(0, 200)}`);
             throw new Error(`Voyager API error: ${resp.status} ${resp.statusText}`);
         }
 
@@ -182,17 +188,19 @@ export class LinkedInClient {
 
         log.info(`Resolving company: ${universalName}`);
 
-        // Try Voyager API first
+        // Try Voyager API - use the correct organization lookup endpoint
         try {
             const data = await this.voyagerGet(
-                `organization/companies?decorationId=com.linkedin.voyager.deco.organization.web.WebFullCompanyMain-38&q=universalName&universalName=${encodeURIComponent(universalName)}`,
+                `organization/companies?decorationId=com.linkedin.voyager.deco.organization.web.WebFullCompanyMain-12&q=universalName&universalName=${encodeURIComponent(universalName)}`,
             );
 
             if (data?.elements?.[0]) {
                 const company = data.elements[0];
+                const companyId = String(company.entityUrn?.split(':').pop() || company.objectUrn?.split(':').pop() || '');
+                log.info(`Voyager API resolved company ID: ${companyId}, name: ${company.name}`);
                 return {
                     universalName: company.universalName || universalName,
-                    companyId: String(company.entityUrn?.split(':').pop() || company.objectUrn?.split(':').pop() || ''),
+                    companyId,
                     name: company.name || universalName,
                     domain: company.companyPageUrl || company.websiteUrl || '',
                     employeeCount: company.staffCount || company.staffCountRange?.start || 0,
@@ -203,20 +211,54 @@ export class LinkedInClient {
             log.debug(`Voyager company lookup failed: ${err.message}`);
         }
 
-        // Fallback: scrape the company page HTML
+        // Fallback: scrape the company page HTML and extract company ID
         try {
             const html = await this.htmlGet(`${LINKEDIN_BASE}/company/${encodeURIComponent(universalName)}/`);
 
-            // Try to find company ID from HTML
-            const companyIdMatch = html.match(/companyId['":\s]+(\d+)/);
-            const nameMatch = html.match(/<title>([^<|]+)/);
+            // Extract company data from embedded JSON
+            let companyId = '';
+            let companyName = universalName;
+            let employeeCount = 0;
+            let domain = '';
+
+            // Look for company ID in various patterns
+            const urnMatch = html.match(/urn:li:fsd_company:(\d+)/);
+            const companyIdMatch = html.match(/company[/:](\d{4,})/);
+            const objectUrnMatch = html.match(/objectUrn.*?(\d{4,})/);
+
+            companyId = urnMatch?.[1] || companyIdMatch?.[1] || objectUrnMatch?.[1] || '';
+
+            // Extract name from <title>
+            const titleMatch = html.match(/<title>([^|<–]+)/);
+            if (titleMatch) {
+                companyName = decodeHtmlEntities(titleMatch[1].trim());
+            }
+
+            // Extract employee count
             const staffMatch = html.match(/(\d[\d,]+)\s+employees?\s+on\s+LinkedIn/i);
+            if (staffMatch) {
+                employeeCount = parseInt(staffMatch[1].replace(/,/g, ''), 10);
+            }
+
+            // Try JSON-LD for structured data
+            const jsonLdMatch = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
+            if (jsonLdMatch) {
+                try {
+                    const jsonLd = JSON.parse(jsonLdMatch[1]);
+                    if (jsonLd.name) companyName = jsonLd.name;
+                    if (jsonLd.url) domain = jsonLd.url;
+                    if (jsonLd.numberOfEmployees?.value) employeeCount = jsonLd.numberOfEmployees.value;
+                } catch { /* ignore */ }
+            }
+
+            log.info(`HTML resolved company ID: ${companyId}, name: ${companyName}`);
 
             return {
                 universalName,
-                companyId: companyIdMatch ? companyIdMatch[1] : '',
-                name: nameMatch ? decodeHtmlEntities(nameMatch[1].trim()) : universalName,
-                employeeCount: staffMatch ? parseInt(staffMatch[1].replace(/,/g, ''), 10) : 0,
+                companyId,
+                name: companyName,
+                domain,
+                employeeCount,
                 linkedinUrl: buildCompanyUrl(universalName),
             };
         } catch (err: any) {
@@ -235,69 +277,57 @@ export class LinkedInClient {
     /** Build Voyager search URL with filters. */
     private buildSearchUrl(query: SearchQuery, page: number): string {
         const start = (page - 1) * RESULTS_PER_PAGE;
-        const params = new globalThis.URL(`${VOYAGER_BASE}/search/dash/clusters`);
 
-        // Build query parameters for the search
-        const queryParams: Array<string> = [];
+        // Build the filters list using LinkedIn's (key->List(...)) format
+        const filters: string[] = [];
 
         if (query.currentCompanies?.length) {
-            const companyList = query.currentCompanies.map((c) => `"${c}"`).join(',');
-            queryParams.push(`currentCompany:List(${companyList})`);
+            filters.push(`currentCompany->List(${query.currentCompanies.join(',')})`);
         }
 
         if (query.locations?.length) {
-            const locationList = query.locations.map((l) => `"${l}"`).join(',');
-            queryParams.push(`geoUrn:List(${locationList})`);
+            filters.push(`geoUrn->List(${query.locations.join(',')})`);
         }
 
         if (query.currentJobTitles?.length) {
-            const titleList = query.currentJobTitles.map((t) => `"${t}"`).join(',');
-            queryParams.push(`title:List(${titleList})`);
+            filters.push(`title->List(${query.currentJobTitles.join(',')})`);
         }
 
         if (query.industryIds?.length) {
-            const industryList = query.industryIds.join(',');
-            queryParams.push(`industry:List(${industryList})`);
+            filters.push(`industry->List(${query.industryIds.join(',')})`);
         }
 
         if (query.seniorityLevelIds?.length) {
-            const seniorityList = query.seniorityLevelIds.join(',');
-            queryParams.push(`seniorityLevel:List(${seniorityList})`);
+            filters.push(`seniorityLevel->List(${query.seniorityLevelIds.join(',')})`);
         }
 
         if (query.functionIds?.length) {
-            const functionList = query.functionIds.join(',');
-            queryParams.push(`function:List(${functionList})`);
+            filters.push(`function->List(${query.functionIds.join(',')})`);
         }
 
         if (query.yearsAtCurrentCompanyIds?.length) {
-            const yearsList = query.yearsAtCurrentCompanyIds.join(',');
-            queryParams.push(`yearsAtCurrentCompany:List(${yearsList})`);
+            filters.push(`yearsAtCurrentCompany->List(${query.yearsAtCurrentCompanyIds.join(',')})`);
         }
 
         if (query.yearsOfExperienceIds?.length) {
-            const expList = query.yearsOfExperienceIds.join(',');
-            queryParams.push(`yearsOfExperience:List(${expList})`);
+            filters.push(`yearsOfExperience->List(${query.yearsOfExperienceIds.join(',')})`);
         }
 
         if (query.companyHeadcount?.length) {
-            const headcountList = query.companyHeadcount.join(',');
-            queryParams.push(`companyHqGeo:List(${headcountList})`);
+            filters.push(`companySize->List(${query.companyHeadcount.join(',')})`);
         }
 
-        queryParams.push('resultType:List(PEOPLE)');
+        // Use the correct people search endpoint format
+        const keywords = query.keywords ? `&keywords=${encodeURIComponent(query.keywords)}` : '';
+        const filterString = filters.length > 0 ? `List(${filters.join(',')})` : 'List()';
 
-        const queryString = queryParams.length > 0
-            ? `(${queryParams.join(',')}${query.keywords ? `,keywords:${encodeURIComponent(query.keywords)}` : ''},includeFiltersInResponse:true)`
-            : `(resultType:List(PEOPLE)${query.keywords ? `,keywords:${encodeURIComponent(query.keywords)}` : ''},includeFiltersInResponse:true)`;
-
-        return `search/dash/clusters?decorationId=com.linkedin.voyager.dash.deco.search.SearchClusterCollection-174&origin=COMPANY_PAGE_CANNED_SEARCH&q=all&query=(flagshipSearchIntent:SEARCH_SRP,queryParameters:${queryString})&count=${RESULTS_PER_PAGE}&start=${start}`;
+        return `search/dash/clusters?decorationId=com.linkedin.voyager.dash.deco.search.SearchClusterCollection-174&origin=COMPANY_PAGE_CANNED_SEARCH&q=all&query=(flagshipSearchIntent:SEARCH_SRP,queryParameters:(currentCompany:List(${query.currentCompanies?.join(',') || ''}),resultType:List(PEOPLE)${keywords}))&count=${RESULTS_PER_PAGE}&start=${start}`;
     }
 
     /** Search for company employees using Voyager API. */
     async searchEmployees(query: SearchQuery, page: number): Promise<SearchResult> {
         const endpoint = this.buildSearchUrl(query, page);
-        log.debug(`Searching employees: page ${page}`);
+        log.debug(`Search URL: ${VOYAGER_BASE}/${endpoint}`);
 
         try {
             const data = await withRetry(
@@ -307,12 +337,37 @@ export class LinkedInClient {
                 `Search page ${page}`,
             );
 
+            log.debug(`Search response keys: ${JSON.stringify(Object.keys(data || {}))}`);
+            log.debug(`Search included count: ${data?.included?.length || 0}`);
+            log.debug(`Search elements count: ${data?.elements?.length || 0}`);
+
             return this.parseSearchResults(data, page);
         } catch (err: any) {
             if (err.message === 'RATE_LIMITED') throw err;
-            log.warning(`Voyager search failed, trying HTML fallback: ${err.message}`);
-            return this.searchEmployeesHtml(query, page);
+            log.warning(`Voyager search failed: ${err.message}`);
+
+            // Try alternate people search endpoint
+            try {
+                log.info('Trying alternate search endpoint...');
+                const altEndpoint = this.buildAlternateSearchUrl(query, page);
+                log.debug(`Alt search URL: ${VOYAGER_BASE}/${altEndpoint}`);
+                const data = await this.voyagerGet(altEndpoint);
+                log.debug(`Alt search response keys: ${JSON.stringify(Object.keys(data || {}))}`);
+                return this.parseSearchResults(data, page);
+            } catch (altErr: any) {
+                log.warning(`Alternate search also failed: ${altErr.message}`);
+                log.info('Trying HTML fallback...');
+                return this.searchEmployeesHtml(query, page);
+            }
         }
+    }
+
+    /** Build an alternate search URL using graphql endpoint. */
+    private buildAlternateSearchUrl(query: SearchQuery, page: number): string {
+        const start = (page - 1) * RESULTS_PER_PAGE;
+        const companyIds = query.currentCompanies?.join(',') || '';
+        const keywords = query.keywords ? `&keywords=${encodeURIComponent(query.keywords)}` : '';
+        return `search/dash/clusters?decorationId=com.linkedin.voyager.dash.deco.search.SearchClusterCollection-186&origin=COMPANY_PAGE_CANNED_SEARCH&q=all&query=(flagshipSearchIntent:SEARCH_SRP,queryParameters:(currentCompany:List(${companyIds}),resultType:List(PEOPLE)))&start=${start}&count=${RESULTS_PER_PAGE}`;
     }
 
     /** Fallback: search employees via HTML page scraping. */
@@ -404,7 +459,10 @@ export class LinkedInClient {
 
         // Parse included entities for mini profiles
         const included = data?.included || [];
+
+        // Method 1: Look for mini profiles in included
         const miniProfiles = findIncludedByType(included, 'MiniProfile');
+        log.debug(`Found ${miniProfiles.length} MiniProfile entities`);
 
         for (const mp of miniProfiles) {
             if (!mp.publicIdentifier || mp.publicIdentifier === 'UNKNOWN') continue;
@@ -424,36 +482,84 @@ export class LinkedInClient {
             });
         }
 
-        // Also check elements array for search results
-        if (profiles.length === 0 && data?.elements) {
-            for (const cluster of data.elements) {
-                const items = cluster?.items || [];
-                for (const item of items) {
-                    const entity = item?.item?.entityResult;
-                    if (!entity) continue;
-                    const title = entity.title?.text || '';
-                    const nameParts = title.split(' ');
-                    const firstName = nameParts[0] || '';
-                    const lastName = nameParts.slice(1).join(' ') || '';
+        // Method 2: Parse from included EntityResultViewModel or SearchProfile
+        if (profiles.length === 0) {
+            for (const item of included) {
+                const typeName = item['$type'] || item._type || '';
 
-                    const urn = entity.entityUrn || '';
-                    const idMatch = urn.match(/\(([^,)]+)/);
-                    const publicId = entity.navigationUrl?.match(/\/in\/([^/?]+)/)?.[1] || '';
+                // Check for various entity result types
+                if (typeName.includes('EntityResult') || typeName.includes('SearchProfile') || typeName.includes('ProfileResult')) {
+                    const title = item.title?.text || '';
+                    if (!title) continue;
+
+                    const nameParts = title.split(' ');
+                    const publicId = item.navigationUrl?.match(/\/in\/([^/?]+)/)?.[1]
+                        || item.entityUrn?.match(/\(([^,)]+)/)?.[1]
+                        || '';
+
+                    if (!publicId) continue;
 
                     profiles.push({
                         publicIdentifier: publicId,
-                        linkedinUrl: publicId ? buildProfileUrl(publicId) : '',
-                        firstName,
-                        lastName,
+                        linkedinUrl: buildProfileUrl(publicId),
+                        firstName: nameParts[0] || '',
+                        lastName: nameParts.slice(1).join(' ') || '',
+                        headline: item.primarySubtitle?.text || item.headline?.text || item.summary?.text || '',
+                        location: parseLocation(item.secondarySubtitle?.text || item.subline?.text),
+                        photo: item.image?.attributes?.[0]?.detailData?.nonEntityProfilePicture?.vectorImage?.rootUrl || null,
+                    });
+                }
+            }
+            log.debug(`Found ${profiles.length} profiles from EntityResult entities`);
+        }
+
+        // Method 3: Check elements array for search clusters
+        if (profiles.length === 0 && data?.elements) {
+            for (const cluster of data.elements) {
+                const items = cluster?.items || cluster?.results || [];
+                for (const item of items) {
+                    const entity = item?.item?.entityResult || item?.entityResult || item;
+                    if (!entity?.title?.text) continue;
+
+                    const title = entity.title.text;
+                    const nameParts = title.split(' ');
+                    const publicId = entity.navigationUrl?.match(/\/in\/([^/?]+)/)?.[1] || '';
+
+                    if (!publicId) continue;
+
+                    profiles.push({
+                        publicIdentifier: publicId,
+                        linkedinUrl: buildProfileUrl(publicId),
+                        firstName: nameParts[0] || '',
+                        lastName: nameParts.slice(1).join(' ') || '',
                         headline: entity.primarySubtitle?.text || entity.summary?.text || '',
                         location: parseLocation(entity.secondarySubtitle?.text),
                         photo: entity.image?.attributes?.[0]?.detailData?.nonEntityProfilePicture?.vectorImage?.rootUrl || null,
                     });
                 }
+
+                // Try to get total count from cluster metadata
+                if (cluster?.metadata?.totalResultCount) {
+                    totalCount = cluster.metadata.totalResultCount;
+                }
+            }
+            log.debug(`Found ${profiles.length} profiles from elements array`);
+        }
+
+        // Try to extract total from paging in various locations
+        if (totalCount === 0) {
+            if (data?.paging?.total) totalCount = data.paging.total;
+            for (const element of (data?.elements || [])) {
+                if (element?.paging?.total) {
+                    totalCount = element.paging.total;
+                    break;
+                }
             }
         }
 
-        const totalPages = Math.ceil(totalCount / RESULTS_PER_PAGE);
+        const totalPages = totalCount > 0 ? Math.ceil(totalCount / RESULTS_PER_PAGE) : 0;
+
+        log.info(`Parsed: ${profiles.length} profiles, total: ${totalCount}, pages: ${totalPages}`);
 
         return {
             profiles,
