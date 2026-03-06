@@ -136,7 +136,7 @@ Actor.main(async () => {
 
     // ─── Company Processing ──────────────────────────────────────────────
 
-    const isOneByOne = companyBatchMode === 'one-by-one';
+    const isOneByOne = companyBatchMode?.toLowerCase().includes('one') ?? false;
     const companyLimit = isOneByOne ? 1000 : 10;
 
     if (companies.length > companyLimit) {

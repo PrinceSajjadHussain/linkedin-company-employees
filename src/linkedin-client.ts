@@ -379,47 +379,53 @@ export class LinkedInClient {
 
     // ─── Employee Search ─────────────────────────────────────────────────────
 
-    /** Build filters in (key:...,value:List(...)) format for GraphQL search. */
+    /**
+     * Build filters in (key:...,value:List(...)) format for search.
+     * IMPORTANT: Use %7C for pipe separator (not literal |) because Node.js URL
+     * class doesn't encode |, but LinkedIn expects %7C (matching Python requests behavior).
+     */
     private buildSearchFilters(query: SearchQuery): string {
+        // LinkedIn's List separator: space + URL-encoded pipe + space
+        const SEP = ' %7C ';
         const filters: string[] = [];
 
         // Always filter to PEOPLE results
         filters.push('(key:resultType,value:List(PEOPLE))');
 
         if (query.currentCompanies?.length) {
-            const joined = query.currentCompanies.join(' | ');
+            const joined = query.currentCompanies.join(SEP);
             filters.push(`(key:currentCompany,value:List(${joined}))`);
         }
         if (query.locations?.length) {
-            const joined = query.locations.join(' | ');
+            const joined = query.locations.join(SEP);
             filters.push(`(key:geoUrn,value:List(${joined}))`);
         }
         if (query.currentJobTitles?.length) {
-            const joined = query.currentJobTitles.join(' | ');
+            const joined = query.currentJobTitles.join(SEP);
             filters.push(`(key:title,value:List(${joined}))`);
         }
         if (query.industryIds?.length) {
-            const joined = query.industryIds.join(' | ');
+            const joined = query.industryIds.join(SEP);
             filters.push(`(key:industry,value:List(${joined}))`);
         }
         if (query.seniorityLevelIds?.length) {
-            const joined = query.seniorityLevelIds.join(' | ');
+            const joined = query.seniorityLevelIds.join(SEP);
             filters.push(`(key:seniorityLevel,value:List(${joined}))`);
         }
         if (query.functionIds?.length) {
-            const joined = query.functionIds.join(' | ');
+            const joined = query.functionIds.join(SEP);
             filters.push(`(key:function,value:List(${joined}))`);
         }
         if (query.yearsAtCurrentCompanyIds?.length) {
-            const joined = query.yearsAtCurrentCompanyIds.join(' | ');
+            const joined = query.yearsAtCurrentCompanyIds.join(SEP);
             filters.push(`(key:yearsAtCurrentCompany,value:List(${joined}))`);
         }
         if (query.yearsOfExperienceIds?.length) {
-            const joined = query.yearsOfExperienceIds.join(' | ');
+            const joined = query.yearsOfExperienceIds.join(SEP);
             filters.push(`(key:yearsOfExperience,value:List(${joined}))`);
         }
         if (query.companyHeadcount?.length) {
-            const joined = query.companyHeadcount.join(' | ');
+            const joined = query.companyHeadcount.join(SEP);
             filters.push(`(key:companySize,value:List(${joined}))`);
         }
 
@@ -464,8 +470,18 @@ export class LinkedInClient {
             const t = item['$type'] || item._type || '';
             if (t) types.add(t.split('.').pop() || t);
         }
+
+        // GraphQL-specific structure
+        const gql = data?.data?.searchDashClustersByAll;
+        const gqlType = gql?._type || gql?.['$type'] || '';
+        const gqlElCount = gql?.elements?.length || 0;
+        const gqlPaging = gql?.paging;
+        const gqlTotal = gqlPaging?.total ?? 'N/A';
+        const gqlItemCount = gql?.elements?.reduce((sum: number, el: any) => sum + (el?.items?.length || 0), 0) || 0;
+
         log.info(
-            `[${label}] keys=${JSON.stringify(keys)}, included=${includedCount}, elements=${elementsCount}, types=[${[...types].join(', ')}]`,
+            `[${label}] keys=${JSON.stringify(keys)}, included=${includedCount}, elements=${elementsCount}, types=[${[...types].join(', ')}]` +
+            (gql ? `, gql:{type=${gqlType.split('.').pop()},clusters=${gqlElCount},items=${gqlItemCount},total=${gqlTotal}}` : ''),
         );
     }
 
@@ -478,7 +494,7 @@ export class LinkedInClient {
 
         // Strategy 1: GraphQL endpoint (matching linkedin-api v2.3.1)
         const graphqlEndpoint = this.buildGraphQLSearchUrl(query, page);
-        log.debug(`GraphQL search: ${graphqlEndpoint.substring(0, 200)}`);
+        log.debug(`GraphQL search URL: ${graphqlEndpoint.substring(0, 300)}`);
 
         try {
             const data = await withRetry(
@@ -491,6 +507,11 @@ export class LinkedInClient {
             this.logResponseStructure(data, 'graphql');
             const result = this.parseSearchResults(data, page);
             if (result.profiles.length > 0) return result;
+            // Debug: log response excerpt when 200 but no profiles
+            if (result.profiles.length === 0) {
+                const body = JSON.stringify(data).substring(0, 500);
+                log.debug(`GraphQL 200 but 0 profiles. Body excerpt: ${body}`);
+            }
             if (result.pagination.totalElements > 0) bestResult = result;
         } catch (err: any) {
             if (err.message === 'RATE_LIMITED') throw err;
