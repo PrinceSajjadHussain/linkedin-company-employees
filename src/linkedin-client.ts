@@ -54,10 +54,14 @@ export class LinkedInClient {
 
     // ─── HTTP Layer (got-scraping with proxy) ────────────────────────────────
 
-    /** Make an HTTP GET request using got-scraping with proxy support. */
+    // Make an HTTP GET request using got-scraping with proxy support.
+    // When isApi=true, disables got-scraping header generation (Sec-Fetch-*,
+    // Accept: text/html, etc.) that interferes with LinkedIn Voyager API.
+    // The Python linkedin-api library sends clean headers (Accept: */*, no Sec-*).
     private async httpGet(
         url: string,
         headers: Record<string, string>,
+        isApi = false,
     ): Promise<{ statusCode: number; body: string; setCookies: string[] }> {
         const proxyUrl = this.proxyConfig
             ? await this.proxyConfig.newUrl()
@@ -71,7 +75,11 @@ export class LinkedInClient {
             followRedirect: true,
             throwHttpErrors: false,
             responseType: 'text',
-        });
+            // Disable header generator for API calls to prevent got-scraping
+            // from injecting Sec-Fetch-Dest:document, Accept:text/html, etc.
+            // that cause LinkedIn API to return 400 or serve HTML.
+            useHeaderGenerator: !isApi,
+        } as any);
 
         const rawSetCookie = response.headers['set-cookie'];
         const setCookies: string[] = Array.isArray(rawSetCookie)
@@ -151,37 +159,38 @@ export class LinkedInClient {
 
     // ─── Voyager API Helpers ─────────────────────────────────────────────────
 
-    /** Get default headers for Voyager API requests. */
+    /** Get default headers for Voyager API requests (matching Python requests defaults). */
     private getHeaders(): Record<string, string> {
         return {
             ...LINKEDIN_HEADERS,
+            accept: '*/*',
             'csrf-token': this.csrfToken,
             cookie: this.cookies,
             'user-agent':
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.116 Safari/537.36',
         };
     }
 
     /** Make a Voyager API request. */
     private async voyagerGet(endpoint: string): Promise<any> {
         const url = `${VOYAGER_BASE}/${endpoint}`;
-        const resp = await this.httpGet(url, this.getHeaders());
+        const resp = await this.httpGet(url, this.getHeaders(), true);
 
-        log.debug(
-            `Voyager GET ${resp.statusCode}: ${endpoint.substring(0, 120)}`,
+        log.info(
+            `Voyager GET ${resp.statusCode}: ${endpoint.substring(0, 140)}`,
         );
 
         if (resp.statusCode === 429) throw new Error('RATE_LIMITED');
 
         if (resp.statusCode === 401 || resp.statusCode === 403) {
-            log.debug(
+            log.info(
                 `Auth error body (first 300): ${resp.body.substring(0, 300)}`,
             );
             throw new Error(`AUTH_REQUIRED: ${resp.statusCode}`);
         }
 
         if (resp.statusCode >= 400) {
-            log.debug(
+            log.info(
                 `Error body (first 300): ${resp.body.substring(0, 300)}`,
             );
             throw new Error(`Voyager API error: ${resp.statusCode}`);
@@ -258,7 +267,7 @@ export class LinkedInClient {
                     };
                 }
             } catch (err: any) {
-                log.debug(`Voyager company lookup (decId=${decId}) failed: ${err.message}`);
+                log.info(`Voyager company lookup (decId=${decId}) failed: ${err.message}`);
             }
         }
 
@@ -289,7 +298,7 @@ export class LinkedInClient {
                 };
             }
         } catch (err: any) {
-            log.debug(`Dash company lookup failed: ${err.message}`);
+            log.info(`Dash company lookup failed: ${err.message}`);
         }
 
         // Fallback: scrape the company page HTML
@@ -494,7 +503,7 @@ export class LinkedInClient {
 
         // Strategy 1: GraphQL endpoint (matching linkedin-api v2.3.1)
         const graphqlEndpoint = this.buildGraphQLSearchUrl(query, page);
-        log.debug(`GraphQL search URL: ${graphqlEndpoint.substring(0, 300)}`);
+        log.info(`GraphQL search URL: ${graphqlEndpoint.substring(0, 300)}`);
 
         try {
             const data = await withRetry(
@@ -510,7 +519,7 @@ export class LinkedInClient {
             // Debug: log response excerpt when 200 but no profiles
             if (result.profiles.length === 0) {
                 const body = JSON.stringify(data).substring(0, 500);
-                log.debug(`GraphQL 200 but 0 profiles. Body excerpt: ${body}`);
+                log.info(`GraphQL 200 but 0 profiles. Body excerpt: ${body}`);
             }
             if (result.pagination.totalElements > 0) bestResult = result;
         } catch (err: any) {
