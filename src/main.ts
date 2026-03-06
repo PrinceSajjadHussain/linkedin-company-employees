@@ -308,7 +308,11 @@ async function processCompanySearch(
 
         if (!searchResult || !searchResult.profiles?.length) {
             consecutiveEmptyPages++;
-            log.info(`No results on page ${page}. (${consecutiveEmptyPages}/${maxConsecutiveEmpty} empty)`);
+            const reportedTotal = searchResult?.pagination?.totalElements || 0;
+            log.info(
+                `No results on page ${page}. (${consecutiveEmptyPages}/${maxConsecutiveEmpty} empty)` +
+                (reportedTotal > 0 ? ` [API reports ${reportedTotal} total but parsing found 0]` : ''),
+            );
             if (consecutiveEmptyPages >= maxConsecutiveEmpty) {
                 log.info('Too many consecutive empty pages, stopping.');
                 break;
@@ -321,7 +325,10 @@ async function processCompanySearch(
         consecutiveEmptyPages = 0;
 
         const { profiles, pagination } = searchResult;
-        totalPages = pagination.totalPages;
+        // Only trust totalPages from responses that actually returned profiles
+        if (pagination.totalPages > 0) {
+            totalPages = pagination.totalPages;
+        }
         firstSearchDone = true;
 
         log.info(

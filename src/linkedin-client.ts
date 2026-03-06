@@ -223,12 +223,49 @@ export class LinkedInClient {
 
         log.info(`Resolving company: ${universalName}`);
 
-        // Try Voyager API
+        // Try Voyager API with multiple decoration IDs
+        const companyDecIds = [40, 35, 28, 20, 12];
+        for (const decId of companyDecIds) {
+            try {
+                const data = await this.voyagerGet(
+                    `organization/companies?decorationId=com.linkedin.voyager.deco.organization.web.WebFullCompanyMain-${decId}&q=universalName&universalName=${encodeURIComponent(universalName)}`,
+                );
+
+                if (data?.elements?.[0]) {
+                    const company = data.elements[0];
+                    const companyId = String(
+                        company.entityUrn?.split(':').pop() ||
+                            company.objectUrn?.split(':').pop() ||
+                            '',
+                    );
+                    log.info(
+                        `Voyager API resolved (decId=${decId}): id=${companyId}, name="${company.name}", staff=${company.staffCount}`,
+                    );
+                    return {
+                        universalName: company.universalName || universalName,
+                        companyId,
+                        name: company.name || universalName,
+                        domain:
+                            company.companyPageUrl || company.websiteUrl || '',
+                        employeeCount:
+                            company.staffCount ||
+                            company.staffCountRange?.start ||
+                            0,
+                        linkedinUrl: buildCompanyUrl(
+                            company.universalName || universalName,
+                        ),
+                    };
+                }
+            } catch (err: any) {
+                log.debug(`Voyager company lookup (decId=${decId}) failed: ${err.message}`);
+            }
+        }
+
+        // Try organization dash API (newer endpoint)
         try {
             const data = await this.voyagerGet(
-                `organization/companies?decorationId=com.linkedin.voyager.deco.organization.web.WebFullCompanyMain-12&q=universalName&universalName=${encodeURIComponent(universalName)}`,
+                `organization/dash/companies?decorationId=com.linkedin.voyager.dash.deco.organization.MiniCompany-2&q=universalName&universalName=${encodeURIComponent(universalName)}`,
             );
-
             if (data?.elements?.[0]) {
                 const company = data.elements[0];
                 const companyId = String(
@@ -237,25 +274,21 @@ export class LinkedInClient {
                         '',
                 );
                 log.info(
-                    `Voyager API resolved: id=${companyId}, name="${company.name}", staff=${company.staffCount}`,
+                    `Dash API resolved: id=${companyId}, name="${company.name}"`,
                 );
                 return {
                     universalName: company.universalName || universalName,
                     companyId,
                     name: company.name || universalName,
-                    domain:
-                        company.companyPageUrl || company.websiteUrl || '',
-                    employeeCount:
-                        company.staffCount ||
-                        company.staffCountRange?.start ||
-                        0,
+                    domain: company.companyPageUrl || company.websiteUrl || '',
+                    employeeCount: company.staffCount || 0,
                     linkedinUrl: buildCompanyUrl(
                         company.universalName || universalName,
                     ),
                 };
             }
         } catch (err: any) {
-            log.debug(`Voyager company lookup failed: ${err.message}`);
+            log.debug(`Dash company lookup failed: ${err.message}`);
         }
 
         // Fallback: scrape the company page HTML
@@ -396,7 +429,26 @@ export class LinkedInClient {
             ? `,keywords:${encodeURIComponent(query.keywords)}`
             : '';
 
-        return `search/dash/clusters?decorationId=com.linkedin.voyager.dash.deco.search.SearchClusterCollection-186&origin=COMPANY_PAGE_CANNED_SEARCH&q=all&query=(flagshipSearchIntent:SEARCH_SRP${keywords},queryParameters:(${qp.join(',')}))&count=${RESULTS_PER_PAGE}&start=${start}`;
+        return `search/dash/clusters?decorationId=com.linkedin.voyager.dash.deco.search.SearchClusterCollection-228&origin=FACETED_SEARCH&q=all&query=(flagshipSearchIntent:SEARCH_SRP${keywords},(includeFiltersInResponse:true),queryParameters:(${qp.join(',')}))&count=${RESULTS_PER_PAGE}&start=${start}`;
+    }
+
+    /** Log the structure of a Voyager API response for debugging. */
+    private logResponseStructure(data: any, label: string): void {
+        if (!data) {
+            log.info(`[${label}] Response is null/undefined`);
+            return;
+        }
+        const keys = Object.keys(data);
+        const includedCount = data?.included?.length || 0;
+        const elementsCount = data?.elements?.length || 0;
+        const types = new Set<string>();
+        for (const item of data?.included || []) {
+            const t = item['$type'] || item._type || '';
+            if (t) types.add(t.split('.').pop() || t);
+        }
+        log.info(
+            `[${label}] keys=${JSON.stringify(keys)}, included=${includedCount}, elements=${elementsCount}, types=[${[...types].join(', ')}]`,
+        );
     }
 
     /** Search for company employees using Voyager API. */
@@ -407,42 +459,105 @@ export class LinkedInClient {
         const endpoint = this.buildSearchUrl(query, page);
         log.debug(`Search endpoint: ${endpoint.substring(0, 200)}`);
 
+        // Decoration IDs to try (newest → oldest)
+        const decorationIds = [228, 218, 207, 200, 193, 186, 174, 165, 158];
+        // Origins to try
+        const origins = ['FACETED_SEARCH', 'COMPANY_PAGE_CANNED_SEARCH', 'SWITCH_SEARCH_VERTICAL', 'GLOBAL_SEARCH_HEADER'];
+
+        let bestResult: SearchResult | null = null;
+
+        // Try primary endpoint first
         try {
             const data = await withRetry(
                 () => this.voyagerGet(endpoint),
-                3,
+                2,
                 3000,
                 `Search page ${page}`,
             );
 
-            log.debug(
-                `Search response: keys=${JSON.stringify(Object.keys(data || {}))} included=${data?.included?.length || 0} elements=${data?.elements?.length || 0}`,
-            );
-
-            return this.parseSearchResults(data, page);
+            this.logResponseStructure(data, 'primary');
+            const result = this.parseSearchResults(data, page);
+            if (result.profiles.length > 0) return result;
+            // Keep result for pagination info even if profiles are empty
+            if (result.pagination.totalElements > 0) bestResult = result;
         } catch (err: any) {
             if (err.message === 'RATE_LIMITED') throw err;
-            log.warning(`Voyager search failed: ${err.message}`);
-
-            // Try alternate decoration IDs
-            for (const decId of [174, 165, 158]) {
-                try {
-                    log.info(`Trying decoration ID ${decId}...`);
-                    const altEndpoint = endpoint.replace(
-                        /SearchClusterCollection-\d+/,
-                        `SearchClusterCollection-${decId}`,
-                    );
-                    const data = await this.voyagerGet(altEndpoint);
-                    return this.parseSearchResults(data, page);
-                } catch (altErr: any) {
-                    log.debug(`Decoration ${decId} failed: ${altErr.message}`);
-                }
-            }
-
-            // HTML fallback
-            log.info('Trying HTML search fallback...');
-            return this.searchEmployeesHtml(query, page);
+            log.warning(`Primary Voyager search failed: ${err.message}`);
         }
+
+        // Try alternate decoration IDs
+        for (const decId of decorationIds) {
+            try {
+                log.debug(`Trying decoration ID ${decId}...`);
+                const altEndpoint = endpoint.replace(
+                    /SearchClusterCollection-\d+/,
+                    `SearchClusterCollection-${decId}`,
+                );
+                const data = await this.voyagerGet(altEndpoint);
+                this.logResponseStructure(data, `decId-${decId}`);
+                const result = this.parseSearchResults(data, page);
+                if (result.profiles.length > 0) return result;
+                if (!bestResult && result.pagination.totalElements > 0) {
+                    bestResult = result;
+                }
+            } catch (err: any) {
+                if (err.message === 'RATE_LIMITED') throw err;
+                log.debug(`Decoration ${decId} failed: ${err.message}`);
+            }
+        }
+
+        // Try alternate origins with a mid-range decoration ID
+        for (const origin of origins) {
+            try {
+                log.debug(`Trying origin ${origin}...`);
+                const altEndpoint = endpoint
+                    .replace(/origin=[A-Z_]+/, `origin=${origin}`)
+                    .replace(/SearchClusterCollection-\d+/, 'SearchClusterCollection-207');
+                const data = await this.voyagerGet(altEndpoint);
+                this.logResponseStructure(data, `origin-${origin}`);
+                const result = this.parseSearchResults(data, page);
+                if (result.profiles.length > 0) return result;
+            } catch (err: any) {
+                if (err.message === 'RATE_LIMITED') throw err;
+                log.debug(`Origin ${origin} failed: ${err.message}`);
+            }
+        }
+
+        // Try without includeFiltersInResponse (older format)
+        try {
+            log.debug('Trying search without includeFiltersInResponse...');
+            const cleanEndpoint = endpoint
+                .replace(/,\(includeFiltersInResponse:true\)/, '')
+                .replace(/SearchClusterCollection-\d+/, 'SearchClusterCollection-207');
+            const data = await this.voyagerGet(cleanEndpoint);
+            this.logResponseStructure(data, 'no-filters');
+            const result = this.parseSearchResults(data, page);
+            if (result.profiles.length > 0) return result;
+        } catch (err: any) {
+            if (err.message === 'RATE_LIMITED') throw err;
+            log.debug(`No-filters search failed: ${err.message}`);
+        }
+
+        // HTML fallback
+        log.info('Trying HTML search fallback...');
+        try {
+            const htmlResult = await this.searchEmployeesHtml(query, page);
+            if (htmlResult.profiles.length > 0) return htmlResult;
+        } catch (err: any) {
+            log.warning(`HTML search fallback failed: ${err.message}`);
+        }
+
+        // Return best available result (even if empty)
+        if (bestResult) return bestResult;
+        return {
+            profiles: [],
+            pagination: {
+                pageNumber: page,
+                totalElements: 0,
+                totalPages: 0,
+                itemsPerPage: RESULTS_PER_PAGE,
+            },
+        };
     }
 
     /** Fallback: search via HTML page. */
@@ -474,33 +589,48 @@ export class LinkedInClient {
         const profiles: Array<ProfileShort> = [];
         let totalCount = 0;
 
-        // Extract data from embedded JSON in <code> tags
+        // Extract data from embedded JSON in <code> tags and <script> tags
         const blobs = extractCodeJsonBlobs(html);
+
+        // Also try to extract from script tags with JSON data
+        const scriptRegex = /<script[^>]*type="application\/json"[^>]*>(\{[\s\S]*?\})<\/script>/gi;
+        let scriptMatch: RegExpExecArray | null;
+        while ((scriptMatch = scriptRegex.exec(html)) !== null) {
+            try {
+                const parsed = JSON.parse(scriptMatch[1]);
+                blobs.push(parsed);
+            } catch { /* skip */ }
+        }
+
         for (const blob of blobs) {
             if (!blob?.included) continue;
 
-            const profileEntities = findIncludedByType(
-                blob.included,
-                'MiniProfile',
-            );
-            for (const p of profileEntities) {
-                if (
-                    p.publicIdentifier &&
-                    p.publicIdentifier !== 'UNKNOWN'
-                ) {
-                    profiles.push({
-                        publicIdentifier: p.publicIdentifier,
-                        linkedinUrl: buildProfileUrl(
-                            p.publicIdentifier,
-                        ),
-                        firstName: p.firstName || '',
-                        lastName: p.lastName || '',
-                        headline: p.occupation || p.headline || '',
-                        location: parseLocation(p.locationName),
-                        photo: p.picture?.rootUrl
-                            ? `${p.picture.rootUrl}${p.picture.artifacts?.[p.picture.artifacts.length - 1]?.fileIdentifyingUrlPathSegment || ''}`
-                            : null,
-                    });
+            // Try multiple entity types
+            const profileEntityTypes = ['MiniProfile', 'Profile', 'SearchProfile', 'EntityResult'];
+            for (const entityType of profileEntityTypes) {
+                const profileEntities = findIncludedByType(
+                    blob.included,
+                    entityType,
+                );
+                for (const p of profileEntities) {
+                    const pubId = p.publicIdentifier || p.navigationUrl?.match(/\/in\/([^/?]+)/)?.[1] || '';
+                    if (
+                        pubId &&
+                        pubId !== 'UNKNOWN' &&
+                        !profiles.some(pr => pr.publicIdentifier === pubId)
+                    ) {
+                        profiles.push({
+                            publicIdentifier: pubId,
+                            linkedinUrl: buildProfileUrl(pubId),
+                            firstName: p.firstName || p.title?.text?.split(' ')[0] || '',
+                            lastName: p.lastName || p.title?.text?.split(' ').slice(1).join(' ') || '',
+                            headline: p.occupation || p.headline || p.primarySubtitle?.text || '',
+                            location: parseLocation(p.locationName || p.secondarySubtitle?.text),
+                            photo: p.picture?.rootUrl
+                                ? `${p.picture.rootUrl}${p.picture.artifacts?.[p.picture.artifacts.length - 1]?.fileIdentifyingUrlPathSegment || ''}`
+                                : p.image?.attributes?.[0]?.detailData?.nonEntityProfilePicture?.vectorImage?.rootUrl || null,
+                        });
+                    }
                 }
             }
 
@@ -510,6 +640,8 @@ export class LinkedInClient {
                 totalCount = blob.data.metadata.totalResultCount;
             }
         }
+
+        log.info(`HTML search: found ${profiles.length} profiles, totalCount=${totalCount}`);
 
         const totalPages = Math.ceil(totalCount / RESULTS_PER_PAGE);
         return {
@@ -523,138 +655,187 @@ export class LinkedInClient {
         };
     }
 
+    /** Extract a profile from an entity-like object (EntityResult, SearchResult, etc.). */
+    private extractProfileFromEntity(entity: any): ProfileShort | null {
+        // Try to get public identifier from various locations
+        const publicId =
+            entity.publicIdentifier ||
+            entity.navigationUrl?.match(/\/in\/([^/?]+)/)?.[1] ||
+            entity.entityUrn?.match(/fsd_profile:([^,)]+)/)?.[1] ||
+            entity.trackingUrn?.match(/member:(\d+)/)?.[1] ||
+            entity.targetUrn?.match(/member:(\d+)/)?.[1] ||
+            '';
+
+        if (!publicId || publicId === 'UNKNOWN') return null;
+
+        // Extract name from title or direct fields
+        const title = entity.title?.text || '';
+        const firstName = entity.firstName || (title ? title.split(' ')[0] : '') || '';
+        const lastName = entity.lastName || (title ? title.split(' ').slice(1).join(' ') : '') || '';
+
+        // Extract headline
+        const headline =
+            entity.occupation ||
+            entity.headline ||
+            entity.primarySubtitle?.text ||
+            entity.headline?.text ||
+            entity.summary?.text ||
+            '';
+
+        // Extract location
+        const locationText =
+            entity.locationName ||
+            entity.secondarySubtitle?.text ||
+            entity.subline?.text ||
+            '';
+
+        // Extract photo
+        const photoUrl =
+            entity.picture?.rootUrl
+                ? `${entity.picture.rootUrl}${entity.picture.artifacts?.[entity.picture.artifacts.length - 1]?.fileIdentifyingUrlPathSegment || ''}`
+                : entity.image?.attributes?.[0]?.detailData
+                      ?.nonEntityProfilePicture?.vectorImage?.rootUrl ||
+                  entity.image?.attributes?.[0]?.detailData
+                      ?.profilePicture?.vectorImage?.rootUrl ||
+                  null;
+
+        return {
+            publicIdentifier: publicId,
+            linkedinUrl: buildProfileUrl(publicId),
+            firstName,
+            lastName,
+            headline,
+            location: parseLocation(locationText),
+            photo: photoUrl,
+        };
+    }
+
     /** Parse Voyager API search response into SearchResult. */
     private parseSearchResults(data: any, page: number): SearchResult {
         const profiles: Array<ProfileShort> = [];
+        const seenIds = new Set<string>();
         let totalCount = 0;
 
-        // Extract total count
+        // Extract total count from various locations
         if (data?.paging?.total != null) totalCount = data.paging.total;
         else if (data?.metadata?.totalResultCount != null)
             totalCount = data.metadata.totalResultCount;
 
         const included = data?.included || [];
 
-        // Method 1: MiniProfile entities in included
-        const miniProfiles = findIncludedByType(included, 'MiniProfile');
-        log.debug(`Found ${miniProfiles.length} MiniProfile entities`);
-
-        for (const mp of miniProfiles) {
-            if (!mp.publicIdentifier || mp.publicIdentifier === 'UNKNOWN')
-                continue;
-
-            const photoUrl = mp.picture?.rootUrl
-                ? `${mp.picture.rootUrl}${mp.picture.artifacts?.[mp.picture.artifacts.length - 1]?.fileIdentifyingUrlPathSegment || ''}`
-                : null;
-
-            profiles.push({
-                publicIdentifier: mp.publicIdentifier,
-                linkedinUrl: buildProfileUrl(mp.publicIdentifier),
-                firstName: mp.firstName || '',
-                lastName: mp.lastName || '',
-                headline: mp.occupation || mp.headline || '',
-                location: parseLocation(mp.locationName),
-                photo: photoUrl,
-            });
+        // Log all entity types found in included for debugging
+        if (included.length > 0) {
+            const typeCounts: Record<string, number> = {};
+            for (const item of included) {
+                const t = (item['$type'] || item._type || 'unknown').split('.').pop() || 'unknown';
+                typeCounts[t] = (typeCounts[t] || 0) + 1;
+            }
+            log.info(`Response entity types: ${JSON.stringify(typeCounts)}`);
         }
 
-        // Method 2: EntityResult / SearchProfile in included
-        if (profiles.length === 0) {
-            for (const item of included) {
-                const t = item['$type'] || item._type || '';
-                if (
-                    t.includes('EntityResult') ||
-                    t.includes('SearchProfile') ||
-                    t.includes('ProfileResult')
-                ) {
-                    const title = item.title?.text || '';
-                    if (!title) continue;
-                    const nameParts = title.split(' ');
-                    const publicId =
-                        item.navigationUrl?.match(
-                            /\/in\/([^/?]+)/,
-                        )?.[1] || '';
-                    if (!publicId) continue;
+        const addProfile = (p: ProfileShort | null) => {
+            if (p && p.publicIdentifier && !seenIds.has(p.publicIdentifier)) {
+                seenIds.add(p.publicIdentifier);
+                profiles.push(p);
+            }
+        };
 
-                    profiles.push({
-                        publicIdentifier: publicId,
-                        linkedinUrl: buildProfileUrl(publicId),
-                        firstName: nameParts[0] || '',
-                        lastName: nameParts.slice(1).join(' ') || '',
-                        headline:
-                            item.primarySubtitle?.text ||
-                            item.headline?.text ||
-                            item.summary?.text ||
-                            '',
-                        location: parseLocation(
-                            item.secondarySubtitle?.text ||
-                                item.subline?.text,
-                        ),
-                        photo:
-                            item.image?.attributes?.[0]?.detailData
-                                ?.nonEntityProfilePicture?.vectorImage
-                                ?.rootUrl || null,
-                    });
+        // Method 1: MiniProfile / Profile entities in included
+        const profileTypes = ['MiniProfile', 'Profile', 'MemberProfile'];
+        for (const ptype of profileTypes) {
+            const entities = findIncludedByType(included, ptype);
+            if (entities.length > 0) {
+                log.info(`Found ${entities.length} ${ptype} entities`);
+                for (const mp of entities) {
+                    addProfile(this.extractProfileFromEntity(mp));
                 }
             }
-            log.debug(
-                `Found ${profiles.length} profiles from EntityResult entities`,
-            );
         }
 
-        // Method 3: elements → items → entityResult
+        // Method 2: EntityResult / SearchProfile / ProfileResult in included
+        if (profiles.length === 0) {
+            const resultTypes = ['EntityResult', 'SearchProfile', 'ProfileResult', 'SearchHit', 'EntityResultViewModel'];
+            for (const item of included) {
+                const t = item['$type'] || item._type || '';
+                if (resultTypes.some(rt => t.includes(rt))) {
+                    addProfile(this.extractProfileFromEntity(item));
+                }
+            }
+            if (profiles.length > 0) {
+                log.info(`Found ${profiles.length} profiles from EntityResult-type entities`);
+            }
+        }
+
+        // Method 3: elements → items → entityResult (cluster-based response)
         if (profiles.length === 0 && data?.elements) {
             for (const cluster of data.elements) {
                 const items =
-                    cluster?.items || cluster?.results || [];
+                    cluster?.items || cluster?.results || cluster?.elements || [];
                 for (const item of items) {
                     const entity =
                         item?.item?.entityResult ||
+                        item?.item?.entity ||
                         item?.entityResult ||
+                        item?.entity ||
                         item;
-                    if (!entity?.title?.text) continue;
-
-                    const title = entity.title.text;
-                    const nameParts = title.split(' ');
-                    const publicId =
-                        entity.navigationUrl?.match(
-                            /\/in\/([^/?]+)/,
-                        )?.[1] || '';
-                    if (!publicId) continue;
-
-                    profiles.push({
-                        publicIdentifier: publicId,
-                        linkedinUrl: buildProfileUrl(publicId),
-                        firstName: nameParts[0] || '',
-                        lastName: nameParts.slice(1).join(' ') || '',
-                        headline:
-                            entity.primarySubtitle?.text ||
-                            entity.summary?.text ||
-                            '',
-                        location: parseLocation(
-                            entity.secondarySubtitle?.text,
-                        ),
-                        photo:
-                            entity.image?.attributes?.[0]?.detailData
-                                ?.nonEntityProfilePicture?.vectorImage
-                                ?.rootUrl || null,
-                    });
+                    addProfile(this.extractProfileFromEntity(entity));
                 }
 
+                // Extract total from cluster metadata
                 if (cluster?.metadata?.totalResultCount)
-                    totalCount = cluster.metadata.totalResultCount;
+                    totalCount = Math.max(totalCount, cluster.metadata.totalResultCount);
+                if (cluster?.paging?.total)
+                    totalCount = Math.max(totalCount, cluster.paging.total);
             }
-            log.debug(
-                `Found ${profiles.length} profiles from elements array`,
-            );
+            if (profiles.length > 0) {
+                log.info(`Found ${profiles.length} profiles from elements array`);
+            }
+        }
+
+        // Method 4: Direct data.results or data.data.searchDashClustersByAll
+        if (profiles.length === 0) {
+            const searchResults =
+                data?.data?.searchDashClustersByAll?.elements ||
+                data?.data?.searchDashClustersByAll?.results ||
+                data?.results ||
+                [];
+            for (const cluster of searchResults) {
+                const items = cluster?.items || cluster?.elements || [];
+                for (const item of items) {
+                    const entity =
+                        item?.item?.entityResult ||
+                        item?.item?.entity ||
+                        item?.entityResult ||
+                        item;
+                    addProfile(this.extractProfileFromEntity(entity));
+                }
+                if (cluster?.metadata?.totalResultCount)
+                    totalCount = Math.max(totalCount, cluster.metadata.totalResultCount);
+            }
+            if (profiles.length > 0) {
+                log.info(`Found ${profiles.length} profiles from nested data`);
+            }
+        }
+
+        // Method 5: Scan ALL included items as a last resort
+        if (profiles.length === 0 && included.length > 0) {
+            log.info('Attempting broad scan of all included entities...');
+            for (const item of included) {
+                // Look for anything that has a navigable profile URL or publicIdentifier
+                if (item.publicIdentifier || item.navigationUrl?.includes('/in/')) {
+                    addProfile(this.extractProfileFromEntity(item));
+                }
+            }
+            if (profiles.length > 0) {
+                log.info(`Found ${profiles.length} profiles from broad scan`);
+            }
         }
 
         // Extract total from various paging locations
         if (totalCount === 0) {
             for (const el of data?.elements || []) {
                 if (el?.paging?.total) {
-                    totalCount = el.paging.total;
-                    break;
+                    totalCount = Math.max(totalCount, el.paging.total);
                 }
             }
         }
@@ -667,6 +848,16 @@ export class LinkedInClient {
         log.info(
             `Parsed: ${profiles.length} profiles, total: ${totalCount}, pages: ${totalPages}`,
         );
+
+        // If we have total count but no profiles, log a warning with sample data for debugging
+        if (totalCount > 0 && profiles.length === 0 && included.length > 0) {
+            const sample = included[0];
+            log.warning(
+                `API reports ${totalCount} results but could not parse profiles. ` +
+                `Sample entity type: ${sample['$type'] || sample._type || 'unknown'}. ` +
+                `Sample keys: ${JSON.stringify(Object.keys(sample).slice(0, 15))}`,
+            );
+        }
 
         return {
             profiles,
