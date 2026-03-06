@@ -268,9 +268,10 @@ async function processCompanySearch(
     const effectiveStartPage = Math.max(startPage, alreadyScrapedPages + 1);
 
     let page = effectiveStartPage;
-    let totalPages = 1;
+    let totalPages = Infinity; // Will be set from first search response
     let consecutiveEmptyPages = 0;
     const maxConsecutiveEmpty = 3;
+    let firstSearchDone = false;
 
     while (totalScraped < maxItems) {
         const maxPage = Math.ceil(MAX_RESULTS_PER_QUERY / RESULTS_PER_PAGE);
@@ -279,7 +280,7 @@ async function processCompanySearch(
             break;
         }
 
-        if (page > totalPages && totalPages > 0) {
+        if (firstSearchDone && totalPages > 0 && page > totalPages) {
             log.info(`Reached last page (${totalPages}), stopping.`);
             break;
         }
@@ -321,6 +322,7 @@ async function processCompanySearch(
 
         const { profiles, pagination } = searchResult;
         totalPages = pagination.totalPages;
+        firstSearchDone = true;
 
         log.info(
             `Found ${profiles.length} profiles on page ${page}. ` +
